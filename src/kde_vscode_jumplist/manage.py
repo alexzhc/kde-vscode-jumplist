@@ -1,0 +1,730 @@
+"""Interactive editor for the pinned entries.
+
+This is what the jump list's "Manage Pinned Files…" action opens. The layout is
+the two-pane box fcitx5's input-method configuration uses: every recent VS Code
+entry in one pane, the pinned subset the menu lists in the other, and the four
+buttons between them. **Which pane is on the left follows `pinned_position`**,
+the setting that also orders the menu, so the dialog reads the way the menu it
+was opened from does -- the menu lists its blocks top to bottom, the dialog left
+to right. The two transfer arrows point at the pane they send entries to, so
+pinning is the rightward move in one layout and the leftward move in the other.
+
+The two panes are independent views rather than a transfer box. `>` adds the
+selected recents to the pinned entries and `<` removes the selected pinned
+entries, but neither touches the recents, so an entry that is pinned is listed
+in both panes and the recents pane never changes when something is pinned or
+unpinned. `^` and `v` reorder the pinned entries. Only the pinned list is ever
+written.
+
+Everything that decides *what* the dialog does lives in :class:`ManageModel`,
+which imports nothing graphical, so the pinning and the reordering stay testable
+in a headless suite; :func:`run_dialog` is the Qt view over it.
+
+The icons are the same ones the jump list uses -- the pane headings take the
+heading icons and each row takes the icon of the entry behind it -- so the
+dialog and the menu cannot drift apart. They are read from
+:mod:`kde_vscode_jumplist.desktop_entry` for that reason rather than repeated.
+
+The window is drawn with Qt 6, through PyQt6. Two things come from that choice
+rather than from styling. Qt's ``ExtendedSelection`` *is* the usual click
+behaviour -- plain click replaces, Ctrl toggles one row, Shift selects the range
+from the last click, Ctrl+Shift extends it -- so none of that is implemented
+here; and Qt 6 has a real Wayland backend, so the window gets a native Wayland
+surface rather than reaching the session through XWayland. On top of that, the
+KDE platform theme gives the window the desktop's own Breeze style and, more to
+the point, resolves the theme's icon names -- which are the same names the jump
+list uses.
+
+Earlier versions drew this with GTK 3, in this same two-pane shape. GTK needed
+its own (Breeze GTK) theme to look like a KDE window at all, and GTK 3 has no
+extended selection mode -- its ``MULTIPLE`` mode *adds* to the selection on a
+plain click -- so the whole click handling had to be written and tested by hand
+here. Those two are why it is now Qt.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+
+from . import APP_NAME, __author__, __url__, __version__
+from . import desktop_entry
+from .desktop_entry import (
+    DEFAULT_ICON,
+    PINNED_CAPTION_ICON,
+    PINNED_ICON,
+    ICON_FOR_KIND,
+    RECENT_CAPTION_ICON,
+)
+from .models import MenuEntry
+from .pinned import Pinned
+from .qtview import (
+    DialogUnavailable,
+    exec_dialog,
+    themed_icon as _themed_icon,
+)
+from .qtview import application as _application
+from .qtview import load_qt as _load_qt
+from .qtview import require_display as _require_display
+from .qtview import use_platform_theme as _use_platform_theme
+from .settings import SETTINGS_ICON, SETTINGS_LABEL, run_settings_dialog
+
+WINDOW_TITLE = "Manage Pinned Files"
+
+# Icon for the dialog window. The vendor desktop entry ships ``Icon=vscode``
+# -- the same name the task manager draws its own icon from -- so the dialog is
+# recognisably the one belonging to the application whose menu opened it. A
+# different VS Code variant ships its own name here (VSCodium is ``vscodium``).
+WINDOW_ICON = "vscode"
+
+# The Wayland app id, which is *not* the icon name: a Wayland client cannot put
+# an icon on its own window, so the compositor looks up ``<app id>.desktop``
+# (here code.desktop, generated with ``Icon=vscode``) and takes the icon from
+# there. Using the icon name as the app id would leave the window with no icon
+# at all, because no ``vscode.desktop`` exists to read it from. Set as the
+# desktop file name before the window is created; see run_dialog.
+WINDOW_APP_ID = "code"
+
+# Roles carried by every row, relative to Qt's first free one (UserRole). The
+# entry ID is what a selection is mapped back through, so a row is never
+# identified by its displayed text -- two entries can read identically. The icon
+# name is recorded for the same reason: it is the thing that has to match the
+# jump list, and a QIcon cannot be asked what it was built from.
+ENTRY_ID_ROLE = 0
+ICON_NAME_ROLE = 1
+
+# Dynamic properties, set on a widget so that what it is showing can be read back
+# (the tests do). A QIcon has no name, and a pixmap is not worth comparing.
+ICON_NAME_PROPERTY = "iconName"
+PANE_TITLE_PROPERTY = "paneTitle"
+# Which of the two lists a pane holds, and which transfer a button performs. Both
+# are recorded rather than inferred from position, because ``pinned_position``
+# decides which pane is on the left and the transfer buttons swap meaning with
+# it.
+PANE_ROLE_PROPERTY = "paneRole"
+BUTTON_ACTION_PROPERTY = "buttonAction"
+RECENT_ROLE = "recent"
+PINNED_ROLE = "pinned"
+
+# The transfer buttons, top to bottom between the two panes. The horizontal
+# pair sends the selection to the pane its arrow points at; the vertical pair
+# reorders the pinned entries, which is also the order the menu lists them in.
+#
+# The two horizontal buttons are named for the *direction* they send entries,
+# not for pinning: which pane sits on the left follows ``pinned_position``, so
+# reaching the pinned list is the rightward move in one layout and the leftward
+# move in the other. The arrow is the direction, the tooltip names the list it
+# sends to, and both travel with the button that ends up doing it.
+#
+# They are drawn with the theme's own arrows rather than as text glyphs, so they
+# match the rest of the desktop the way fcitx5's list boxes do. The labels are
+# the fallback for an icon theme that has no such icon: a button with nothing
+# visible on it would be unusable.
+LEFT_ICON = "go-previous"
+RIGHT_ICON = "go-next"
+UP_ICON = "go-up"
+DOWN_ICON = "go-down"
+LEFT_LABEL = "<"
+RIGHT_LABEL = ">"
+UP_LABEL = "^"
+DOWN_LABEL = "v"
+
+# The two things a transfer button can be for, recorded on the button so it can
+# be found by what it does rather than by where it sits -- the tests do that, and
+# so does the button-enabling code.
+PIN_ACTION = "pin"
+UNPIN_ACTION = "unpin"
+
+# Icon-only buttons do not say what they do, and the arrows are a convention
+# rather than a statement, so each one carries its meaning as a tooltip. The two
+# transfer tooltips name their destination list, which is what makes them
+# readable whichever side that list is on.
+UNPIN_TOOLTIP = "Remove from Pinned Files"
+PIN_TOOLTIP = "Add to Pinned Files"
+UP_TOOLTIP = "Move up"
+DOWN_TOOLTIP = "Move down"
+TOOLTIP_FOR_ACTION = {PIN_ACTION: PIN_TOOLTIP, UNPIN_ACTION: UNPIN_TOOLTIP}
+
+# What the About window reports, as data rather than as dialog lines: the four
+# facts are checked directly by the tests, and the dialog is built from them.
+ABOUT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Project", APP_NAME),
+    ("Version", __version__),
+    ("Author", __author__),
+    ("Github", __url__),
+)
+ABOUT_BUTTON_LABEL = "About"
+CLOSE_BUTTON_LABEL = "Close"
+
+# Window size, and the side of the square the four middle buttons are fixed to.
+# A button left to size itself would be a wide rectangle, which does not line the
+# column up; a square does.
+WINDOW_SIZE = (900, 480)
+BUTTON_SIZE = 34
+
+# Pane headings, matching the jump list's two captions.
+RECENT_PANE_TITLE = "Recent Files"
+PINNED_PANE_TITLE = "Pinned Files"
+RECENT_PANE_ICON = RECENT_CAPTION_ICON
+PINNED_PANE_ICON = PINNED_CAPTION_ICON
+
+# The size the menu draws these icons at, and the size they are drawn here.
+ROW_ICON_SIZE = 16
+
+# Shown in an empty search box. A placeholder rather than a label, so the box
+# does not need one of its own and the two panes cannot drift.
+SEARCH_PLACEHOLDER = "Search"
+
+
+def _row_text(entry: MenuEntry) -> str:
+    """How an entry reads in a list: its label, exactly as the menu shows it.
+
+    No kind prefix and no ID, so the panes show what the jump list will show.
+    Two entries can therefore read identically, which is why selections are
+    tracked by entry ID rather than by the displayed text.
+    """
+    return entry.label
+
+
+def entry_icon(entry: MenuEntry, pinned: bool) -> str:
+    """The icon for one entry, chosen the same way the menu chooses it.
+
+    A pinned entry gets the star whatever its kind, so the right pane reads as
+    pinned at a glance; a recent gets the icon for its kind (a folder for a
+    folder, a document for a file). Pure naming, so it is testable without a
+    display -- and reading the menu's own tables is what keeps the two agreeing.
+    """
+    if pinned:
+        return PINNED_ICON
+    return ICON_FOR_KIND.get(entry.kind, DEFAULT_ICON)
+
+
+
+
+class ManageModel:
+    """The dialog's state and behaviour, with no GUI toolkit involved.
+
+    The view reads :meth:`visible_recents` / :meth:`visible_pinned` and calls
+    the mutators; keeping the decisions here is what lets the suite cover the
+    search, the pinning and the reordering without a display.
+    """
+
+    def __init__(self, recents: Iterable[MenuEntry], pinned: Pinned) -> None:
+        self._recents = list(recents)
+        self.pinned = pinned
+        self._recent_query = ""
+        self._pinned_query = ""
+        # Set once something was pinned, unpinned or reordered, so the caller
+        # knows whether the menu still has to be regenerated.
+        self.dirty = False
+
+    # -- what the two panes show -------------------------------------------
+
+    @staticmethod
+    def _matches(entry: MenuEntry, query: str) -> bool:
+        """Case-insensitive substring match on the label, then on the URI.
+
+        The URI is searched as well so a remote entry can be found by its host
+        ("ssh-remote+box"), which the label does not always spell out.
+        """
+        if not query:
+            return True
+        needle = query.casefold()
+        return needle in entry.label.casefold() or needle in entry.uri.casefold()
+
+    def set_recent_query(self, text: str) -> None:
+        self._recent_query = text.strip()
+
+    def set_pinned_query(self, text: str) -> None:
+        self._pinned_query = text.strip()
+
+    def visible_recents(self) -> list[MenuEntry]:
+        """Every recent entry, narrowed by the left search.
+
+        Pinned entries stay listed. The panes are two independent views -- all
+        recents on the left, the pinned subset on the right -- rather than a
+        transfer box, so an entry being pinned shows up in both and nothing
+        ever leaves the left pane.
+        """
+        return [
+            entry for entry in self._recents if self._matches(entry, self._recent_query)
+        ]
+
+    def visible_pinned(self) -> list[MenuEntry]:
+        """Pinned entries, in menu order, narrowed by the right search."""
+        return [
+            entry
+            for entry in self.pinned.all()
+            if self._matches(entry, self._pinned_query)
+        ]
+
+    # -- the four buttons ---------------------------------------------------
+
+    def pin(self, entries: Iterable[MenuEntry]) -> int:
+        """Pin every entry given; returns how many were newly pinned."""
+        pinned = sum(1 for entry in entries if self.pinned.pin(entry))
+        self.dirty = self.dirty or pinned > 0
+        return pinned
+
+    def unpin(self, entries: Iterable[MenuEntry]) -> int:
+        """Unpin every entry given; returns how many were removed."""
+        removed = sum(1 for entry in entries if self.pinned.unpin(entry.entry_id))
+        self.dirty = self.dirty or removed > 0
+        return removed
+
+    def move(self, entry: MenuEntry, offset: int) -> bool:
+        """Move one pinned up (negative) or down; True when it moved."""
+        moved = self.pinned.move(entry.entry_id, offset)
+        self.dirty = self.dirty or moved
+        return moved
+
+    def can_move(self, entry: MenuEntry | None, offset: int) -> bool:
+        """Whether ``entry`` has room to move, so the buttons can be greyed out."""
+        if entry is None:
+            return False
+        order = [item.entry_id for item in self.pinned.all()]
+        if entry.entry_id not in order:
+            return False
+        return 0 <= order.index(entry.entry_id) + offset < len(order)
+
+
+
+def _middle_button(icon_name: str, label: str, tooltip: str, QtGui, QtWidgets):
+    """A square button showing the theme's ``icon_name``.
+
+    Falls back to ``label`` when the theme has no such icon, so the button is
+    never blank and unidentifiable. The icon name is recorded on the button
+    either way, because a QIcon cannot be asked what it was built from.
+    """
+    button = QtWidgets.QPushButton()
+    button.setProperty(ICON_NAME_PROPERTY, icon_name)
+    button.setToolTip(tooltip)
+    icon = _themed_icon(icon_name, ROW_ICON_SIZE, QtGui)
+    if icon.isNull():
+        button.setText(label)
+    else:
+        button.setIcon(icon)
+    button.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+    return button
+
+
+def _build_pane(title: str, icon_name: str, role: str, QtCore, QtGui, QtWidgets):
+    """One pane: its heading, its search box and its list.
+
+    Returns ``(pane, listing, query)``. The heading is built by hand rather than
+    handed to a QGroupBox, whose title frame carries text only -- this heading
+    has to show the same icon the jump list's caption does. ``role`` is recorded
+    on the pane so it can be found without knowing which side it is on.
+    """
+    pane = QtWidgets.QWidget()
+    pane.setProperty(PANE_ROLE_PROPERTY, role)
+    column = QtWidgets.QVBoxLayout(pane)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(6)
+
+    header = QtWidgets.QWidget()
+    # Recorded on the header so the tests can read back what it was given; see
+    # ICON_NAME_PROPERTY.
+    header.setProperty(PANE_TITLE_PROPERTY, title)
+    header.setProperty(ICON_NAME_PROPERTY, icon_name)
+    heading = QtWidgets.QHBoxLayout(header)
+    heading.setContentsMargins(0, 0, 0, 0)
+    heading.setSpacing(6)
+    # Skipped rather than drawn blank when the theme cannot resolve the name:
+    # an empty badge would leave a gap in front of the title. This is reachable
+    # -- a Qt without the desktop's platform theme has no icon theme at all --
+    # and the heading still says which list it is either way.
+    icon = _themed_icon(icon_name, ROW_ICON_SIZE, QtGui)
+    if not icon.isNull():
+        badge = QtWidgets.QLabel()
+        badge.setPixmap(icon.pixmap(ROW_ICON_SIZE, ROW_ICON_SIZE))
+        heading.addWidget(badge)
+    caption = QtWidgets.QLabel(title)
+    font = caption.font()
+    font.setBold(True)
+    caption.setFont(font)
+    heading.addWidget(caption)
+    heading.addStretch(1)
+    column.addWidget(header)
+
+    query = QtWidgets.QLineEdit()
+    query.setPlaceholderText(SEARCH_PLACEHOLDER)
+    # A search box that cannot be emptied without selecting the text is worse
+    # than one that can.
+    query.setClearButtonEnabled(True)
+    column.addWidget(query)
+
+    listing = _entry_list_class(QtCore, QtWidgets)()
+    # The usual click/Ctrl/Shift behaviour, from the toolkit -- with one part
+    # kept here; see the class docstring.
+    listing.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+    listing.setIconSize(QtCore.QSize(ROW_ICON_SIZE, ROW_ICON_SIZE))
+    listing.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+    listing.setUniformItemSizes(True)
+    column.addWidget(listing, 1)
+    return pane, listing, query
+
+
+# The list widget the two panes use, built on first use. A factory rather than a
+# module-scope definition because PyQt6 is imported lazily: this module has to
+# import on a system without it, so it cannot subclass QtWidgets at module scope.
+_ENTRY_LIST_CLASS = None
+
+
+def _entry_list_class(QtCore, QtWidgets):
+    """The QListWidget both panes are built from, defined once."""
+    global _ENTRY_LIST_CLASS
+    if _ENTRY_LIST_CLASS is not None:
+        return _ENTRY_LIST_CLASS
+
+    SelectionFlag = QtCore.QItemSelectionModel.SelectionFlag
+
+    class EntryList(QtWidgets.QListWidget):
+        """A list that forgets where a Shift range started when it is cleared.
+
+        Qt handles all of this itself -- a plain click replaces the selection,
+        Ctrl toggles one row, Shift selects the range from the last click,
+        Ctrl+Shift extends it, and a click past the last row clears it -- except
+        for one thing. The row a Shift range is measured from is kept by Qt
+        privately, and is *not* forgotten when the selection is cleared.
+
+        The panes clear each other, so without this a Shift click after a click
+        in the other pane would extend from a row that is not selected any more:
+        a range appearing out of nowhere, which is exactly what the panes being
+        mutually exclusive is meant to prevent. So the anchor is kept here,
+        beside the selection it belongs to, and only the Shift case is handled
+        in full; everything else is Qt's.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._anchor: int | None = None
+
+        def forget_selection(self) -> None:
+            """Drop the selection *and* the row a Shift range is measured from."""
+            self.clearSelection()
+            self._anchor = None
+
+        def mousePressEvent(self, event) -> None:
+            row = self.indexAt(event.position().toPoint()).row()
+            shift = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+            if shift and row >= 0:
+                self._select_range(row, bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier))
+                return
+            super().mousePressEvent(event)
+            if row >= 0:
+                # A plain or Ctrl click is what a range is measured from.
+                self._anchor = row
+            elif not event.modifiers():
+                # The click was past the last row, which cleared the selection,
+                # so there is nothing left for a range to be measured from. With
+                # a modifier held that click is a no-op, and the anchor stands.
+                self._anchor = None
+
+        def _select_range(self, row: int, control: bool) -> None:
+            """Select from the anchor to ``row``, keeping the anchor itself.
+
+            With no anchor there is nothing to measure from -- the selection was
+            cleared from the other pane -- so this row is selected alone rather
+            than reaching back to the row Qt still remembers.
+            """
+            if not control:
+                self.clearSelection()
+            start, end = (
+                (self._anchor, row) if self._anchor is not None else (row, row)
+            )
+            for position in range(min(start, end), max(start, end) + 1):
+                self.item(position).setSelected(True)
+            self._anchor = row if self._anchor is None else self._anchor
+            # Move the cursor with the selection, so keyboard navigation carries
+            # on from where the click landed -- without letting the selection
+            # model touch the selection, which has just been set.
+            self.selectionModel().setCurrentIndex(
+                self.model().index(row, 0), SelectionFlag.NoUpdate
+            )
+
+    _ENTRY_LIST_CLASS = EntryList
+    return _ENTRY_LIST_CLASS
+
+
+def build_about_dialog(parent) -> object:
+    """The About window: project, version, author and repository on one page.
+
+    Hand-built rather than using a richer About box: the four facts are the whole
+    content, so they are laid out as a label/value grid with a Close button and
+    nothing else -- no logo, and no second page of credits.
+
+    Returned rather than shown, so the window can be inspected without a display
+    (see the tests).
+    """
+    QtCore, _QtGui, QtWidgets = _load_qt()
+
+    about = QtWidgets.QDialog(parent)
+    about.setWindowTitle(f"About {APP_NAME}")
+    about.setModal(True)
+
+    outer = QtWidgets.QVBoxLayout(about)
+    grid = QtWidgets.QGridLayout()
+    grid.setColumnStretch(1, 1)
+    outer.addLayout(grid)
+    for row, (label, value) in enumerate(ABOUT_FIELDS):
+        heading = QtWidgets.QLabel(f"{label}:")
+        heading.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        # Dimmed so the values, not the field names, are what stands out.
+        heading.setEnabled(False)
+        grid.addWidget(heading, row, 0)
+
+        if value.startswith(("http://", "https://")):
+            # A URL is worth clicking, and the text shown is the URL itself
+            # rather than a name for it, so the dialog still states it plainly.
+            cell = QtWidgets.QLabel(f'<a href="{value}">{value}</a>')
+            cell.setOpenExternalLinks(True)
+        else:
+            # Selectable so the version can be copied out of the window.
+            cell = QtWidgets.QLabel(value)
+            cell.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+        grid.addWidget(cell, row, 1)
+
+    footer = QtWidgets.QHBoxLayout()
+    close = QtWidgets.QPushButton(CLOSE_BUTTON_LABEL)
+    close.clicked.connect(about.accept)
+    footer.addStretch(1)
+    footer.addWidget(close)
+    outer.addLayout(footer)
+    return about
+
+
+def _build_dialog(model: ManageModel):
+    """Build the manager window, wired to ``model``.
+
+    Built separately from :func:`run_dialog` so the window can be built, and
+    inspected, without an event loop.
+    """
+    QtCore, QtGui, QtWidgets = _load_qt()
+
+    dialog = QtWidgets.QDialog()
+    dialog.setWindowTitle(WINDOW_TITLE)
+    dialog.setWindowIcon(_themed_icon(WINDOW_ICON, 0, QtGui))
+    dialog.resize(*WINDOW_SIZE)
+
+    # Vertical stack: the panes row, then the footer. Putting the footer in the
+    # horizontal box instead would place it as a column beside the panes.
+    outer = QtWidgets.QVBoxLayout(dialog)
+    body = QtWidgets.QHBoxLayout()
+    outer.addLayout(body, 1)
+
+    # The entries each list is showing, so a selection can be mapped back to the
+    # entries behind it rather than to row numbers.
+    shown: dict[str, list[MenuEntry]] = {RECENT_ROLE: [], PINNED_ROLE: []}
+    panes: dict[str, object] = {}
+    # The transfer buttons by the action they carry, filled in once they exist.
+    # update_buttons reads it, and is only ever called after that.
+    button_for: dict[str, object] = {}
+
+    recent_pane, recent_list, recent_query = _build_pane(
+        RECENT_PANE_TITLE, RECENT_PANE_ICON, RECENT_ROLE, QtCore, QtGui, QtWidgets
+    )
+    pinned_pane, pinned_list, pinned_query = _build_pane(
+        PINNED_PANE_TITLE, PINNED_PANE_ICON, PINNED_ROLE, QtCore, QtGui, QtWidgets
+    )
+    panes.update({RECENT_ROLE: recent_list, PINNED_ROLE: pinned_list})
+
+    # Which pane sits on the left follows `pinned_position`, the same setting
+    # that orders the menu, so the dialog reads the way the menu it was opened
+    # from does: the menu lists its two blocks top to bottom, this lists them
+    # left to right. Sending entries towards the pinned list is the pin, so that
+    # -- and the tooltip naming the destination -- is what travels with the
+    # pane, while each arrow keeps pointing the way the entries go.
+    pinned_first = not desktop_entry.pinned_below_recents()
+    left_action, right_action = (
+        (PIN_ACTION, UNPIN_ACTION) if pinned_first else (UNPIN_ACTION, PIN_ACTION)
+    )
+
+    def selected(key: str) -> list[MenuEntry]:
+        """The entries selected in one pane, in the order the pane lists them."""
+        chosen = {
+            item.data(int(QtCore.Qt.ItemDataRole.UserRole) + ENTRY_ID_ROLE)
+            for item in panes[key].selectedItems()
+        }
+        return [entry for entry in shown[key] if entry.entry_id in chosen]
+
+    def update_buttons() -> None:
+        """Grey out whatever cannot act on the current selection."""
+        button_for[PIN_ACTION].setEnabled(bool(selected(RECENT_ROLE)))
+        pinned_selected = selected(PINNED_ROLE)
+        button_for[UNPIN_ACTION].setEnabled(bool(pinned_selected))
+        # Reordering is a one-at-a-time operation: with several rows selected
+        # there is no single "up" that means anything.
+        single = pinned_selected[0] if len(pinned_selected) == 1 else None
+        for button, offset in ((up_button, -1), (down_button, 1)):
+            button.setEnabled(model.can_move(single, offset))
+
+    def refresh(preserve: bool = True) -> None:
+        """Repopulate both panes from the model, keeping the selection if asked."""
+        previous = {key: selected(key) if preserve else [] for key in panes}
+        shown[RECENT_ROLE] = model.visible_recents()
+        shown[PINNED_ROLE] = model.visible_pinned()
+        for key, listing in panes.items():
+            pinned = key == PINNED_ROLE
+            # Rebuilding clears the selection, which would otherwise fire
+            # selectionChanged and drop the *other* pane's selection while it was
+            # being restored.
+            listing.blockSignals(True)
+            listing.clear()
+            for entry in shown[key]:
+                icon_name = entry_icon(entry, pinned)
+                item = QtWidgets.QListWidgetItem(_themed_icon(icon_name, ROW_ICON_SIZE, QtGui), _row_text(entry))
+                item.setData(int(QtCore.Qt.ItemDataRole.UserRole) + ENTRY_ID_ROLE, entry.entry_id)
+                item.setData(int(QtCore.Qt.ItemDataRole.UserRole) + ICON_NAME_ROLE, icon_name)
+                # The label alone does not say where an entry points.
+                item.setToolTip(entry.uri)
+                listing.addItem(item)
+            keep = {entry.entry_id for entry in previous[key]}
+            for row, entry in enumerate(shown[key]):
+                if entry.entry_id in keep:
+                    listing.item(row).setSelected(True)
+            listing.blockSignals(False)
+        update_buttons()
+
+    def clear_other_pane(key: str) -> None:
+        """Drop the other pane's selection, so only one list is ever active.
+
+        Without this it would be ambiguous which list the four buttons act on.
+        Only done when *this* pane gained a selection: an empty selection is
+        what clearing a pane produces, and reacting to that would make the two
+        panes clear each other.
+        """
+        if not selected(key):
+            return
+        other = panes[PINNED_ROLE if key == RECENT_ROLE else RECENT_ROLE]
+        if not other.selectedItems():
+            return
+        # forget_selection rather than clearSelection: it drops the row a Shift
+        # range would be measured from as well. See _entry_list_class.
+        other.blockSignals(True)
+        other.forget_selection()
+        other.blockSignals(False)
+
+    def on_selection_changed(key: str) -> None:
+        clear_other_pane(key)
+        update_buttons()
+
+    def transfer_pin() -> None:
+        if model.pin(selected(RECENT_ROLE)):
+            # Only the pinned entries changed: the recents pane still lists
+            # everything, so both panes keep their selection.
+            refresh()
+
+    def transfer_unpin() -> None:
+        if model.unpin(selected(PINNED_ROLE)):
+            refresh()
+
+    def reorder(offset: int) -> None:
+        chosen = selected(PINNED_ROLE)
+        if len(chosen) == 1 and model.move(chosen[0], offset):
+            refresh()  # the entry keeps its selection on its new row
+
+    middle = QtWidgets.QVBoxLayout()
+    middle.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+    # The arrows are the directions, so the left one is always the left one; what
+    # the layout decides is the action it carries and the list its tooltip names.
+    # The action is recorded on the button so the enabling code and the tests can
+    # ask for "the pin button" without knowing which side that is.
+    def transfer_button(is_left: bool) -> object:
+        action = left_action if is_left else right_action
+        button = _middle_button(
+            LEFT_ICON if is_left else RIGHT_ICON,
+            LEFT_LABEL if is_left else RIGHT_LABEL,
+            TOOLTIP_FOR_ACTION[action],
+            QtGui,
+            QtWidgets,
+        )
+        button.setProperty(BUTTON_ACTION_PROPERTY, action)
+        button.clicked.connect(
+            transfer_pin if action == PIN_ACTION else transfer_unpin
+        )
+        return button
+
+    left_button, right_button = transfer_button(True), transfer_button(False)
+    button_for = {left_action: left_button, right_action: right_button}
+    up_button = _middle_button(UP_ICON, UP_LABEL, UP_TOOLTIP, QtGui, QtWidgets)
+    down_button = _middle_button(DOWN_ICON, DOWN_LABEL, DOWN_TOOLTIP, QtGui, QtWidgets)
+    up_button.clicked.connect(lambda: reorder(-1))
+    down_button.clicked.connect(lambda: reorder(1))
+    for button in (left_button, right_button, up_button, down_button):
+        middle.addWidget(button)
+
+    body.addWidget(pinned_pane if pinned_first else recent_pane, 1)
+    body.addLayout(middle)
+    body.addWidget(recent_pane if pinned_first else pinned_pane, 1)
+
+    # One row spanning the window: Settings and About at the left edge, Close at
+    # the right.
+    footer = QtWidgets.QHBoxLayout()
+    settings_button = QtWidgets.QPushButton(SETTINGS_LABEL)
+    settings_icon = _themed_icon(SETTINGS_ICON, ROW_ICON_SIZE, QtGui)
+    if not settings_icon.isNull():
+        settings_button.setIcon(settings_icon)
+    about_button = QtWidgets.QPushButton(ABOUT_BUTTON_LABEL)
+    about_button.clicked.connect(lambda: build_about_dialog(dialog).exec())
+    close_button = QtWidgets.QPushButton(CLOSE_BUTTON_LABEL)
+    close_button.clicked.connect(dialog.accept)
+    footer.addWidget(settings_button)
+    footer.addWidget(about_button)
+    footer.addStretch(1)
+    footer.addWidget(close_button)
+    outer.addLayout(footer)
+
+    def open_settings() -> None:
+        """Show the settings window, and regenerate the menu if it changed.
+
+        Through the model's own dirty flag, which is what the caller already
+        watches: the settings decide how the menu is built, so a change to them
+        needs the same regeneration a change to the pinned entries does.
+        """
+        if run_settings_dialog(dialog):
+            model.dirty = True
+
+    settings_button.clicked.connect(open_settings)
+
+    for key, listing in panes.items():
+        listing.itemSelectionChanged.connect(lambda key=key: on_selection_changed(key))
+
+    recent_query.textChanged.connect(
+        lambda text: (model.set_recent_query(text), refresh())
+    )
+    pinned_query.textChanged.connect(
+        lambda text: (model.set_pinned_query(text), refresh())
+    )
+
+    refresh()
+    return dialog
+
+
+# The runner the suite replaces to drive the window without an event loop; see
+# qtview.exec_dialog.
+_run = exec_dialog
+
+
+def run_dialog(model: ManageModel) -> bool:
+    """Show the manager in a Qt window, blocking until it is closed.
+
+    Returns True when the pinned entries changed, so the caller can regenerate
+    the menu. There is deliberately no Cancel button: edits are written as they
+    are made -- the file is tiny and written atomically -- so closing never
+    discards work, and nothing implies otherwise.
+    """
+    _require_display()
+    # Both of these have to happen before a window exists: the platform theme is
+    # read when the application is created, and the app id decides which
+    # <app id>.desktop file the compositor draws the window icon from.
+    _use_platform_theme()
+    QtCore, QtGui, QtWidgets = _load_qt()
+    QtGui.QGuiApplication.setDesktopFileName(WINDOW_APP_ID)
+    _application(QtWidgets)
+
+    dialog = _build_dialog(model)
+    _run(dialog)
+    return model.dirty

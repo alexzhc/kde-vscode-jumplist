@@ -1,0 +1,21 @@
+# Environment for working on the project: the runtime dependencies plus the
+# `dev` and `qt` extras from pyproject.toml.
+#
+#   pip install -r requirements-dev.txt
+#
+# Equivalent one-liner, which is what a contributor would otherwise type:
+#   pip install -e '.[dev,qt]'
+#
+# tests/test_requirements.py keeps the lists below in step with pyproject.toml.
+-r requirements.txt
+
+# [dev] the test suite; `make test` runs it.
+pytest>=8
+
+# [qt] the `manage` dialog, and the tests that drive it. On a KDE system the
+# system package (python3-pyqt6) is the better choice: it shares Qt with the
+# desktop, so it finds the KDE platform theme and draws with the desktop's own
+# style and icons. The wheel here bundles its own Qt, which cannot load the
+# system's KDE plugin -- the dialog still works, drawing with Qt's built-in
+# style and falling back to text where an icon is missing.
+PyQt6>=6.5

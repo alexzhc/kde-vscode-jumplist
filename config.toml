@@ -1,0 +1,44 @@
+# kde-vscode-jumplist configuration.
+#
+# Found in this order, first one wins:
+#   1. ./config.toml                            (a checkout, or a portable install)
+#   2. ~/.config/kde-vscode-jumplist/config.toml (where `install` puts it)
+# `--config PATH` names a file instead of searching, which is what the generated
+# menu actions and the systemd unit do.
+#
+# Every setting below is required: the tool has no built-in defaults, so this
+# file is where its configuration lives. `install` copies it to
+# ~/.config/kde-vscode-jumplist/config.toml when that does not exist yet, and
+# the service reads the copy from then on.
+#
+# Paths may use ~, and a relative one is resolved against this file's own
+# directory rather than the working directory -- so a checkout can keep
+# everything inside itself with e.g. data_dir = ".tmp".
+
+# Directory holding this tool's own files: pinned.json, entries.json and
+# sync.lock.
+data_dir = "~/.config/kde-vscode-jumplist"
+
+# Directory the generated .desktop file is written to (Plasma reads it there).
+apps_dir = "~/.local/share/applications"
+
+# VS Code user data directory -- the one holding User/globalStorage/state.vscdb.
+# An empty string means "detect every installation".
+vscode_dir = ""
+
+# Exact files, for unusual layouts. Each one wins over the directory settings
+# above; an empty string means "detect".
+state_db = ""   # the profile database itself
+shared_db = ""  # the shared database, ~/.vscode-shared/sharedStorage/state.vscdb
+desktop = ""    # the vendor .desktop file to copy and extend
+exec = ""       # the executable to open entries with
+
+# Recent entries listed in the menu, newest first. 0 lists no recents at all.
+max_recents = 10
+
+# Entry kinds left out of the recents list: "folder", "file" or "workspace".
+# An empty list keeps every kind. Pinned entries are never filtered.
+exclude_kinds = ["workspace"]
+
+# Which block comes first: "above" (pinned entries first) or "below" (recents).
+pinned_position = "below"

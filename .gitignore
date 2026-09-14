@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+bin/
+.tmp/
+.pytest_cache/
+.venv/
+*.vscdb-journal
+*.vscdb-wal
+*.vscdb-shm
+.git.bak/

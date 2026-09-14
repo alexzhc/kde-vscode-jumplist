@@ -1,0 +1,14 @@
+# Runtime dependencies, mirroring the `dependencies` list in pyproject.toml.
+#
+#   pip install -r requirements.txt
+#
+# pyproject.toml is the source of truth: pip reads it directly (`pip install .`
+# or `pipx install .`) and tools/build_zipapp.py bundles the same list into
+# bin/kde-vscode-jumplist. This file exists for tooling that expects a
+# requirements file -- a CI job, a container image, Dependabot -- so
+# tests/test_requirements.py asserts it agrees with pyproject rather than
+# letting it drift. Nothing is pinned here for that reason: a pin would have to
+# be kept in step with the range in pyproject by hand.
+#
+# Working on the project instead? requirements-dev.txt adds the test package.
+tabulate>=0.9

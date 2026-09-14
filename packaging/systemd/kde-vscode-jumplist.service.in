@@ -1,0 +1,14 @@
+# Reference copy for packaging; `kde-vscode-jumplist install` writes the unit
+# itself (see cli.SERVICE_TEMPLATE) so its ExecStart can be verified first.
+# Keep the two in sync.
+[Unit]
+Description=Keep KDE Plasma jump lists in step with VS Code's recent entries
+
+[Service]
+Type=simple
+@ENVIRONMENT@ExecStart=@EXEC_START@ update --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
