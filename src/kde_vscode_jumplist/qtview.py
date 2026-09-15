@@ -121,3 +121,30 @@ def exec_dialog(dialog) -> None:
     window by hand.
     """
     dialog.exec()
+
+
+def popup_menu(menu, global_position) -> None:
+    """Show ``menu`` at ``global_position``, blocking until a row is picked.
+
+    A seam for the same reason :func:`exec_dialog` is one: it lets the suite be
+    handed the menu that was built -- to read its rows, and to pick one --
+    instead of an event loop having to open it and a click having to be forged.
+    """
+    menu.exec(global_position)
+
+
+def copy_to_clipboard(text: str) -> None:
+    """Put ``text`` on the clipboard, importing Qt on first use.
+
+    No Qt modules are handed in, unlike the dialog builders: there is nothing to
+    be given here that the caller already has, so the signature stays a plain
+    string in and nothing out -- which is also what lets the dialog keep its
+    copy rows free of toolkit code.
+
+    The clipboard belongs to the running application and a Wayland or X11
+    clipboard is *served* by the process that filled it, so this is one more
+    reason the QApplication has to outlive the window: see the module-scope
+    _APPLICATION above.
+    """
+    _QtCore, _QtGui, QtWidgets = load_qt()
+    QtWidgets.QApplication.clipboard().setText(text)

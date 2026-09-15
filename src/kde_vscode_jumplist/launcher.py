@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,11 @@ from .discovery import Installation, discover_installations
 from .models import ENTRY_FILE, ENTRY_FOLDER, ENTRY_WORKSPACE, MenuEntry
 
 log = logging.getLogger(__name__)
+
+# What shows a directory in the desktop's file manager. Asking the desktop
+# rather than naming Dolphin, for the same reason the jump list does not name an
+# editor: the session decides which one it uses, and the tool stays out of it.
+FILE_MANAGER = "xdg-open"
 
 
 def build_command(installation: Installation, entry: MenuEntry) -> list[str]:
@@ -41,20 +47,15 @@ def build_command(installation: Installation, entry: MenuEntry) -> list[str]:
     return [*base, *args]
 
 
-def open_entry(entry: MenuEntry, installations: list[Installation] | None = None) -> int:
-    """Launch VS Code for ``entry``. Returns the process exit status."""
-    installations = installations if installations is not None else discover_installations()
-    installation = next((i for i in installations if i.variant == entry.source), None)
-    if installation is None:
-        installation = installations[0] if installations else None
-    if installation is None:
-        log.error("no VS Code installation found to open %s", entry.uri)
-        return 127
+def _spawn(command: list[str]) -> int:
+    """Start ``command`` detached, with no shell and no output.
 
-    command = build_command(installation, entry)
+    Shared by both launchers so neither can drift into using a shell or into
+    inheriting this process's streams: a click has to survive the CLI exiting.
+    """
     log.info("launching: %s", command)
     try:
-        process = subprocess.Popen(  # noqa: S603 - argv list, no shell
+        subprocess.Popen(  # noqa: S603 - argv list, no shell
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -65,3 +66,35 @@ def open_entry(entry: MenuEntry, installations: list[Installation] | None = None
         log.error("failed to launch %s: %s", command[0], error)
         return 127
     return 0
+
+
+def open_entry(entry: MenuEntry, installations: list[Installation] | None = None) -> int:
+    """Launch VS Code for ``entry``. Returns the process exit status."""
+    installations = installations if installations is not None else discover_installations()
+    installation = next((i for i in installations if i.variant == entry.source), None)
+    if installation is None:
+        installation = installations[0] if installations else None
+    if installation is None:
+        log.error("no VS Code installation found to open %s", entry.uri)
+        return 127
+
+    return _spawn(build_command(installation, entry))
+
+
+def open_folder(folder: Path) -> int:
+    """Show ``folder`` in the desktop's file manager. Returns the exit status.
+
+    Asked of the desktop rather than naming Dolphin, for the same reason the
+    jump list does not name an editor: which file manager a session uses is the
+    session's business, and this tool stays out of it.
+
+    The directory is deliberately not checked for existence. A path whose file
+    is gone but whose directory survived still opens; one whose whole tree is
+    gone is reported by the desktop itself, which is what a click on a stale
+    entry should do rather than the tool quietly deciding nothing happened.
+    """
+    handler = shutil.which(FILE_MANAGER)
+    if handler is None:
+        log.error("%s is not installed, cannot show %s", FILE_MANAGER, folder)
+        return 127
+    return _spawn([handler, str(folder)])

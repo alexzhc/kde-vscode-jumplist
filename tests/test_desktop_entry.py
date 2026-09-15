@@ -20,7 +20,6 @@ from kde_vscode_jumplist.desktop_entry import (
     PINNED_CAPTION_MARKER,
     PINNED_CAPTION_PAD_FREE,
     PINNED_CAPTION_PAD_RATIO,
-    NOOP_EXEC,
     RECENT_CAPTION_ACTION_ID,
     RECENT_CAPTION_ICON,
     RECENT_CAPTION_TEXT,
@@ -281,7 +280,9 @@ def test_pinned_entries_get_the_star_icon() -> None:
         if not action.startswith("KdeVsCodeJumpList-Pinned"):
             continue
         section = f"Desktop Action {action}"
-        assert parser.get(section, "Icon") == PINNED_ICON == "non-starred"
+        # The filled star, not the outline one the manager dialog uses on its own
+        # pinned rows (manage.PINNED_ROW_ICON) -- the two are separate names.
+        assert parser.get(section, "Icon") == PINNED_ICON == "starred"
         assert not parser.get(section, "Name").endswith(" [pinned]")
 
     # Recents keep their per-kind icons, so the star reads as "pinned".
@@ -583,9 +584,10 @@ def test_captions_head_their_blocks() -> None:
     """Each heading sits directly under the separator opening its block.
 
     A separator cannot carry text, so a heading is a real action: it has to
-    have real text (Kickoff skips empty-text actions) and an Exec. The recents
-    heading is inert; the pinned one opens the manager -- see
-    test_the_pinned_heading_opens_the_manager.
+    have real text (Kickoff skips empty-text actions) and an Exec, and both of
+    ours launch the manager -- see
+    test_the_pinned_heading_opens_the_manager and
+    test_the_recents_heading_also_opens_the_manager.
     """
     pinned, recents = _entries()
     content = build_desktop_content(VENDOR_DESKTOP, pinned, recents)
@@ -598,7 +600,11 @@ def test_captions_head_their_blocks() -> None:
             PINNED_CAPTION_ICON,
             f"{desktop_launcher_command()} manage",
         ),
-        RECENT_CAPTION_ACTION_ID: (RECENT_CAPTION_TEXT, RECENT_CAPTION_ICON, NOOP_EXEC),
+        RECENT_CAPTION_ACTION_ID: (
+            RECENT_CAPTION_TEXT,
+            RECENT_CAPTION_ICON,
+            f"{desktop_launcher_command()} manage",
+        ),
     }
     # The pinned heading says what it does. The marker is pushed to the right
     # edge by padding the text out, so the heading is the widest item in the
@@ -615,13 +621,16 @@ def test_captions_head_their_blocks() -> None:
     assert set(pad) <= {" "}  # only spaces, and possibly none
     assert heading == heading.rstrip()  # nothing trailing to be trimmed off
     assert "\t" not in heading  # a tab would go to the shortcut column instead
-    # The recents heading is a plain heading: no marker, no padding. It is
-    # inert, so a chevron there would promise a submenu that does not exist.
+    # The recents heading is a plain heading: no marker, no padding. It opens
+    # the manager like the other one, but the pinned heading is the one that
+    # has to be the widest item for its marker to reach the right edge, so a
+    # chevron here would only widen the menu.
     assert RECENT_CAPTION_TEXT == "Recent Files:"
     assert PINNED_CAPTION_MARKER not in RECENT_CAPTION_TEXT
     assert "\t" not in RECENT_CAPTION_TEXT
     # The pinned heading carries the manager's own icon, because that is what
-    # clicking it does.
+    # clicking it does. The recents heading keeps its clock: the two have to
+    # stay tellable apart.
     assert PINNED_CAPTION_ICON == "bookmark-new"
     assert RECENT_CAPTION_ICON == "clock"
     assert PINNED_CAPTION_ICON != RECENT_CAPTION_ICON
@@ -647,11 +656,13 @@ def test_captions_head_their_blocks() -> None:
         assert not parser.has_option(section, "NoDisplay")
         assert not parser.has_option(section, "Type")
 
-    # Only the recents heading is inert; every other generated action launches,
-    # the pinned heading included.
+    # Every generated action launches something: the captions included, which
+    # is the point of there being no inert-caption constant any more.
     for name in actions:
-        if name.startswith("KdeVsCodeJumpList-") and name != RECENT_CAPTION_ACTION_ID:
-            assert parser.get(f"Desktop Action {name}", "Exec") != NOOP_EXEC
+        if name.startswith("KdeVsCodeJumpList-"):
+            assert parser.get(f"Desktop Action {name}", "Exec").startswith(
+                desktop_launcher_command() + " "
+            )
 
 
 def test_heading_padding_appears_only_when_it_is_needed() -> None:
@@ -763,27 +774,32 @@ def test_the_menu_ends_with_a_separator() -> None:
 
 
 def test_the_pinned_heading_opens_the_manager() -> None:
-    """Clicking "Pinned Files:" runs the CLI's ``manage``, and is not inert."""
+    """Clicking "Pinned Files:" runs the CLI's ``manage``."""
     pinned, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
     section = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
 
     assert parser.get(section, "Name") == _expected_heading(pinned, recents)
     assert parser.get(section, "Exec") == f"{desktop_launcher_command()} manage"
-    assert parser.get(section, "Exec") != NOOP_EXEC
     # Plasma skips actions carrying NoDisplay, so it stays visible.
     assert not parser.has_option(section, "NoDisplay")
     # And its icon is the manager's, which is what says what a click does.
     assert parser.get(section, "Icon") == PINNED_CAPTION_ICON
 
 
-def test_the_recents_heading_stays_inert() -> None:
-    """Only the pinned heading is clickable; "Recent Files:" must do nothing."""
+def test_the_recents_heading_also_opens_the_manager() -> None:
+    """Both headings are clickable: "Recent Files:" opens the dialog too."""
     pinned, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
     section = f"Desktop Action {RECENT_CAPTION_ACTION_ID}"
 
-    assert parser.get(section, "Exec") == NOOP_EXEC
+    assert parser.get(section, "Name") == RECENT_CAPTION_TEXT
+    assert parser.get(section, "Exec") == f"{desktop_launcher_command()} manage"
+    # Plasma skips actions carrying NoDisplay, so it stays visible.
+    assert not parser.has_option(section, "NoDisplay")
+    # It keeps the clock rather than taking the manager's bookmark icon: the
+    # headings have to stay distinguishable from each other.
+    assert parser.get(section, "Icon") == RECENT_CAPTION_ICON
 
 
 def test_recent_caption_absent_without_recents() -> None:
@@ -1168,11 +1184,11 @@ def test_generated_actions_use_verified_launcher() -> None:
         if not section.startswith("Desktop Action KdeVsCodeJumpList-"):
             continue
         exec_value = parser.get(section, "Exec")
-        if exec_value == NOOP_EXEC:
-            continue  # the inert caption is intentionally not a launcher
         assert exec_value.startswith(prefix + " "), exec_value
         checked += 1
-    assert checked == 5  # 1 pinned + 3 recents (the workspace is excluded) + manager
+    # 1 pinned + 3 recents (the workspace is excluded) + both headings, which
+    # launch the manager rather than being inert.
+    assert checked == 6
 
 
 

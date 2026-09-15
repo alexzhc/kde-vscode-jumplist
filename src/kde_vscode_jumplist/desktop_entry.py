@@ -7,9 +7,10 @@ these via KService and shows them in the icon context menu.
 
 Actions invoke ``kde-vscode-jumplist open <entry-id>``; the ID is resolved
 from the entry store, so no URIs or quoting-sensitive data appear in Exec
-lines. The "Pinned Files:" heading invokes ``manage`` instead, which opens the
-pinning dialog -- so the heading is both a heading and the way in, rather than
-a heading plus a separate entry further down the menu.
+lines. The "Pinned Files:" and "Recent Files:" headings invoke ``manage``
+instead, which opens the pinning dialog -- so each heading is both a heading
+and a way in, rather than a heading plus a separate entry further down the
+menu.
 
 The launcher baked into those Exec lines is verified before use: Plasma and
 systemd do not inherit the environment the sync ran in (notably PYTHONPATH),
@@ -83,13 +84,16 @@ SEPARATOR = "_SEPARATOR_"
 # that opens its block. The ids deliberately avoid the "Pinned-" and
 # "Recent-" prefixes so per-entry lookups never match them.
 #
-# The pinned heading doubles as the way into the manager: clicking it opens the
-# dialog that pins, unpins and reorders, so there is no separate "Manage Pinned
-# Files" entry to go looking for. Its icon is the manager's own -- a bookmark
-# with a plus, which reads as "add to this list".
+# Both headings double as the way into the manager: clicking either one opens
+# the dialog that pins, unpins and reorders, so there is no separate "Manage
+# Pinned Files" entry to go looking for. The pinned heading takes the manager's
+# own icon -- a bookmark with a plus, which reads as "add to this list" -- and
+# the recents heading keeps its clock, so a heading is never mistaken for the
+# other heading or for a row.
 #
-# A marker after the text stands in for the arrow a submenu row carries, so the
-# heading reads as clickable, and it is pushed to the right edge with padding.
+# The pinned heading also ends with a marker standing in for the arrow a submenu
+# row carries, so it reads as clickable, and that marker is pushed to the right
+# edge with padding.
 #
 # A Qt menu draws each item's text from a fixed left inset, so the only way to
 # reach the right edge is for the heading to be the widest item in the menu: the
@@ -152,9 +156,6 @@ RECENT_CAPTION_TEXT = "Recent Files:"
 # distinct from PINNED_CAPTION_ICON so a heading is never mistaken for one
 # another (tests assert that).
 RECENT_CAPTION_ICON = "clock"
-# What an inert caption launches: /bin/true exits 0 and does nothing. Only the
-# recents heading is inert; the pinned one opens the manager.
-NOOP_EXEC = "/bin/true"
 
 # Icon name per entry kind. The names must exist in the usual icon themes
 # (Breeze, hicolor): Plasma shows a placeholder for a name it cannot resolve,
@@ -173,11 +174,12 @@ ICON_FOR_KIND = {
 # what marks the entry as a pinned one at a glance, which the folder/file icon
 # cannot show.
 #
-# It is Breeze's *outline* star, not the filled one ("starred"): hollow reads as
-# a state rather than as a rating, and it stays legible at 16px where a filled
-# star's points blur together. Breeze has both at 16/22/24px, and the two are
-# drawn to match, so switching between them is a one-word difference.
-PINNED_ICON = "non-starred"
+# It is Breeze's *filled* star. The manager dialog draws the outline one on its
+# own pinned rows instead (``manage.PINNED_ROW_ICON``), and the two are separate
+# names on purpose: either can be changed without silently changing the other.
+# Breeze ships both at 16/22/24px and draws them to match, so the difference
+# between the two is one word in either module.
+PINNED_ICON = "starred"
 
 
 def pinned_caption_text(longest_label: int = 0) -> str:
@@ -404,13 +406,13 @@ def _add_caption_group(
     action_id: str,
     text: str,
     icon: str,
-    exec_line: str = NOOP_EXEC,
+    exec_line: str,
 ) -> str:
     """Write one section caption; returns its action id.
 
-    Inert by default -- ``/bin/true`` exits 0 and does nothing, which is what a
-    heading that is only a heading should do. The pinned heading passes its own
-    ``exec_line`` instead, because it opens the manager.
+    ``exec_line`` has no default: a caption is a real action -- a separator
+    cannot carry text -- and both of ours open the manager, so the one thing a
+    default could supply is a clickable row that does nothing.
     """
     section = f"Desktop Action {action_id}"
     parser.add_section(section)
@@ -470,6 +472,9 @@ def build_desktop_content(
     # Verified once per generation pass (spawns a probe process), then reused
     # by every action so all of them are clickable from Plasma.
     cli_command = desktop_launcher_command()
+    # Both headings run it, so the one Exec they share is put together here
+    # rather than spelled out twice below.
+    manage_exec = f"{cli_command} manage"
 
     def add_group(entry: MenuEntry, pinned: bool) -> str:
         """Write one desktop action group; returns its action id."""
@@ -499,9 +504,9 @@ def build_desktop_content(
     def pinned_block() -> list[str]:
         """Separator, the pinned heading, and the pinned entries.
 
-        Never empty: the heading is the action that opens the manager, so it is
-        the only way to pin anything from the menu, and omitting it because
-        nothing is pinned yet would leave no way in. With no pinned entries the
+        Never empty: its heading opens the manager, and the menu always has to
+        keep a way back into the dialog -- which is what is left when there is
+        nothing pinned and nothing recent to head. With no pinned entries the
         block is therefore just its separator and heading.
         """
         heading = _add_caption_group(
@@ -509,7 +514,7 @@ def build_desktop_content(
             PINNED_CAPTION_ACTION_ID,
             pinned_caption_text(longest_label),
             PINNED_CAPTION_ICON,
-            f"{cli_command} manage",
+            manage_exec,
         )
         entries = [add_group(entry, pinned=True) for entry in listed_pinned]
         return [SEPARATOR, heading, *entries]
@@ -520,6 +525,11 @@ def build_desktop_content(
         Excluded kinds (workspaces) were dropped before the limit was applied,
         so the limit counts only entries that actually get listed -- and it is
         what is left of the budget after the pinned block took its share.
+
+        Its heading opens the manager like the other one does, but unlike the
+        pinned block it is still dropped when empty: a heading is only worth a
+        row when there is something under it, and the pinned heading is always
+        there as the last way in.
         """
         entries = [add_group(entry, pinned=False) for entry in listed_recents]
         if not entries:
@@ -531,6 +541,7 @@ def build_desktop_content(
                 RECENT_CAPTION_ACTION_ID,
                 RECENT_CAPTION_TEXT,
                 RECENT_CAPTION_ICON,
+                manage_exec,
             ),
             *entries,
         ]

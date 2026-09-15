@@ -41,6 +41,8 @@ from kde_vscode_jumplist.manage import (
     BUTTON_ACTION_PROPERTY,
     BUTTON_SIZE,
     CLOSE_BUTTON_LABEL,
+    COPY_PATH_ACTION,
+    COPY_PATH_LABEL,
     DOWN_ICON,
     DOWN_LABEL,
     DOWN_TOOLTIP,
@@ -48,10 +50,15 @@ from kde_vscode_jumplist.manage import (
     ICON_NAME_ROLE,
     LEFT_ICON,
     LEFT_LABEL,
+    OPEN_FOLDER_ACTION,
+    OPEN_FOLDER_LABEL,
+    OPEN_IN_CODE_ACTION,
+    OPEN_IN_CODE_LABEL,
     PANE_ROLE_PROPERTY,
     PANE_TITLE_PROPERTY,
     PINNED_PANE_ICON,
     PINNED_ROLE,
+    PINNED_ROW_ICON,
     PIN_ACTION,
     PIN_TOOLTIP,
     RECENT_PANE_ICON,
@@ -68,7 +75,9 @@ from kde_vscode_jumplist.manage import (
     DialogUnavailable,
     ManageModel,
     build_about_dialog,
+    context_items,
     entry_icon,
+    run_context_action,
 )
 from kde_vscode_jumplist.models import (
     ENTRY_FILE,
@@ -312,11 +321,11 @@ def test_dirty_tracks_a_refused_move(model: ManageModel) -> None:
     assert model.dirty is False
 
 
-def test_row_icon_follows_the_menu() -> None:
-    """Rows take the menu's icon for the entry, chosen the same way.
+def test_row_icon_is_the_star_for_pinned_and_the_kind_icon_for_recents() -> None:
+    """Rows take the menu's icon for the entry's kind, and a star when pinned.
 
-    A pinned entry is starred whatever its kind; a recent takes the icon for
-    its kind. Reading the menu's own tables is what keeps the two agreeing.
+    A pinned entry is starred whatever its kind; a recent takes the icon for its
+    kind, read from the menu's own table.
     """
     folder = _entry("proj")
     note = _entry("notes.md", kind=ENTRY_FILE)
@@ -327,9 +336,22 @@ def test_row_icon_follows_the_menu() -> None:
     # A kind the menu has no icon for falls back rather than inventing one.
     assert entry_icon(workspace, pinned=False) == DEFAULT_ICON
     # Pinned replaces the kind icon, which is what marks it out.
-    assert entry_icon(folder, pinned=True) == PINNED_ICON
-    assert entry_icon(note, pinned=True) == PINNED_ICON
-    assert PINNED_ICON != ICON_FOR_KIND[ENTRY_FOLDER]
+    assert entry_icon(folder, pinned=True) == PINNED_ROW_ICON
+    assert entry_icon(note, pinned=True) == PINNED_ROW_ICON
+    assert PINNED_ROW_ICON != ICON_FOR_KIND[ENTRY_FOLDER]
+
+
+def test_the_dialog_star_is_not_the_menus() -> None:
+    """The window's star is hollow, the menu's is filled, and they are two names.
+
+    The one icon the two deliberately disagree on. Kept apart as separate
+    constants rather than one shared one, so changing either is a change to that
+    one surface -- which is only safe while something notices if they are ever
+    welded back together, hence this test.
+    """
+    assert PINNED_ROW_ICON == "non-starred"
+    assert PINNED_ICON == "starred"
+    assert PINNED_ROW_ICON != PINNED_ICON
 
 
 def test_pane_icons_are_the_menu_headings() -> None:
@@ -377,6 +399,188 @@ def test_middle_button_arrows_come_from_the_theme() -> None:
         text
         for text in (UNPIN_TOOLTIP, PIN_TOOLTIP, UP_TOOLTIP, DOWN_TOOLTIP)
     )
+
+
+# --- the entry context menu ----------------------------------------------
+#
+# The path helpers the menu is built on live in uris.py and models.py, but the
+# menu is what they exist for, so they are exercised here with it rather than in
+# a file of their own.
+
+
+def test_context_menu_offers_the_three_rows_asked_for() -> None:
+    """Open in Code, Open Folder, Copy Path -- and nothing else."""
+    rows = context_items(_entry("proj"))
+
+    assert [row.label for row in rows] == [
+        OPEN_IN_CODE_LABEL,
+        OPEN_FOLDER_LABEL,
+        COPY_PATH_LABEL,
+    ]
+    assert [row.action for row in rows] == [
+        OPEN_IN_CODE_ACTION,
+        OPEN_FOLDER_ACTION,
+        COPY_PATH_ACTION,
+    ]
+    # Every row is iconned, and no two share one, so they read apart at a glance.
+    assert all(row.icon for row in rows)
+    assert len({row.icon for row in rows}) == 3
+
+
+def test_context_menu_enables_every_row_for_a_local_entry() -> None:
+    """A file, a folder or a workspace on this machine can do all three."""
+    for entry in (
+        _entry("proj"),
+        _entry("notes.md", uri="file:///home/u/notes.md", kind=ENTRY_FILE),
+        _entry("w", uri="file:///home/u/w.code-workspace", kind=ENTRY_WORKSPACE),
+    ):
+        assert [row.enabled for row in context_items(entry)] == [True, True, True]
+
+
+def test_context_menu_greys_out_what_a_remote_entry_cannot_do() -> None:
+    """A remote entry opens in VS Code, but has no path on this machine.
+
+    The rows stay in the menu greys rather than leaving: the menu keeps its
+    shape, and why a row does nothing is visible instead of the row vanishing.
+    """
+    entry = _entry("proj", uri="vscode-remote://ssh-remote+box/srv/proj", remote=True)
+
+    assert [row.enabled for row in context_items(entry)] == [True, False, False]
+
+
+def test_local_path_is_only_for_this_machine() -> None:
+    """Scheme, authority and encoding each decide whether there is a path."""
+    entry = _entry("proj")
+    assert entry.local_path == Path("/proj")
+    # A space arrives percent-encoded and has to come back decoded: the path is
+    # handed to a file manager and pasted into shells, not used as a URI.
+    assert _entry("p", uri="file:///home/u/My%20Projects").local_path == Path(
+        "/home/u/My Projects"
+    )
+    # file://localhost/x is a local file URI carrying an authority.
+    assert _entry("p", uri="file://localhost/home/u").local_path == Path("/home/u")
+
+    for uri in (
+        "vscode-remote://ssh-remote+box/srv/proj",  # another machine
+        "vscode-vfs://github/o/r",  # a virtual filesystem
+        "file://buildhost/home/u",  # a file URI on another machine
+        "/home/u/plain",  # no scheme at all
+        "file:relative/path",  # not absolute
+    ):
+        assert _entry("p", uri=uri).local_path is None, uri
+    # Built directly: _entry() substitutes a URI for an empty one.
+    assert MenuEntry(ENTRY_FOLDER, "", "p", "code").local_path is None
+
+
+def test_local_folder_is_the_folder_itself_or_the_one_holding_it() -> None:
+    """A folder entry is its own folder; a file's is the one around it.
+
+    Which one it is follows from the kind, so the menu can offer "Open Folder"
+    for all of them and mean one thing.
+    """
+    folder = _entry("proj", uri="file:///home/u/proj")
+    note = _entry("notes.md", uri="file:///home/u/notes.md", kind=ENTRY_FILE)
+    workspace = _entry("w", uri="file:///home/u/w.code-workspace", kind=ENTRY_WORKSPACE)
+
+    assert folder.local_folder == Path("/home/u/proj")
+    assert note.local_folder == Path("/home/u")
+    assert workspace.local_folder == Path("/home/u")
+
+    remote = _entry("p", uri="vscode-remote://ssh-remote+box/srv/proj", remote=True)
+    assert remote.local_folder is None
+
+
+def test_open_in_code_launches_the_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row launches VS Code the way a menu click does."""
+    entry = _entry("proj")
+    launched: list[MenuEntry] = []
+
+    def fake_open_entry(candidate: MenuEntry) -> int:
+        launched.append(candidate)
+        return 0
+
+    monkeypatch.setattr(cli.manage_panel, "open_entry", fake_open_entry)
+
+    assert run_context_action(OPEN_IN_CODE_ACTION, entry) == 0
+    assert launched == [entry]
+
+
+def test_open_folder_shows_the_folder_the_entry_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder entry is shown itself; a file's folder is shown instead."""
+    shown: list[Path] = []
+
+    def fake_open_folder(folder: Path) -> int:
+        shown.append(folder)
+        return 0
+
+    monkeypatch.setattr(cli.manage_panel, "open_folder", fake_open_folder)
+
+    folder = _entry("proj", uri="file:///home/u/proj")
+    note = _entry("notes.md", uri="file:///home/u/notes.md", kind=ENTRY_FILE)
+    assert run_context_action(OPEN_FOLDER_ACTION, folder) == 0
+    assert run_context_action(OPEN_FOLDER_ACTION, note) == 0
+
+    assert shown == [Path("/home/u/proj"), Path("/home/u")]
+
+
+def test_copy_path_puts_the_path_on_the_clipboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What is copied is the path itself, not the URI it came from."""
+    entry = _entry("proj", uri="file:///home/u/My%20Projects")
+    copied: list[str] = []
+    monkeypatch.setattr(cli.manage_panel, "_copy_to_clipboard", copied.append)
+
+    assert run_context_action(COPY_PATH_ACTION, entry) == 0
+    assert copied == ["/home/u/My Projects"]
+
+
+def test_a_remote_entry_refuses_the_rows_that_need_a_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The greyed rows do nothing even if they are somehow reached.
+
+    Being greyed out is the normal guard; this is the one behind it, so a row
+    cannot show or copy another machine's path by mistake.
+    """
+    entry = _entry("proj", uri="vscode-remote://ssh-remote+box/srv/proj", remote=True)
+    called: list[object] = []
+    monkeypatch.setattr(cli.manage_panel, "open_folder", called.append)
+    monkeypatch.setattr(cli.manage_panel, "_copy_to_clipboard", called.append)
+
+    assert run_context_action(OPEN_FOLDER_ACTION, entry) == 2
+    assert run_context_action(COPY_PATH_ACTION, entry) == 2
+    assert called == []
+
+
+def test_an_unknown_context_row_is_a_bug_not_a_no_op() -> None:
+    """A row that does not exist cannot be silently ignored."""
+    with pytest.raises(ValueError):
+        run_context_action("delete", _entry("proj"))
+
+
+def test_no_context_row_writes_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row is read-only, so a right-click can never dirty the dialog."""
+    pinned = Pinned(tmp_path / "pinned.json")
+    model = ManageModel([_entry("alpha"), _entry("beta")], pinned)
+    model.pin(model.visible_recents()[:1])
+    before = (tmp_path / "pinned.json").read_bytes()
+    model.dirty = False
+
+    monkeypatch.setattr(cli.manage_panel, "open_entry", lambda entry: 0)
+    monkeypatch.setattr(cli.manage_panel, "open_folder", lambda folder: 0)
+    monkeypatch.setattr(cli.manage_panel, "_copy_to_clipboard", lambda text: None)
+
+    for entry in model.visible_recents() + model.visible_pinned():
+        for row in context_items(entry):
+            assert run_context_action(row.action, entry) == 0
+
+    assert (tmp_path / "pinned.json").read_bytes() == before
+    assert model.dirty is False
 
 
 # --- the window itself ----------------------------------------------------
@@ -516,7 +720,7 @@ def _icons_are_drawn(listing) -> bool:
     dialog is built for that case (icons are optional and fall back to text), so
     the assertions that care about rendering skip instead of failing.
     """
-    if _qt_or_skip().QtGui.QIcon.fromTheme(PINNED_ICON).isNull():
+    if _qt_or_skip().QtGui.QIcon.fromTheme(PINNED_ROW_ICON).isNull():
         return False
     return bool(listing.count()) and not listing.item(0).icon().isNull()
 
@@ -547,6 +751,68 @@ def _click(listing, index, modifiers=None) -> None:
 def _selected(listing) -> list[int]:
     """The selected row numbers, in order."""
     return sorted(listing.row(item) for item in listing.selectedItems())
+
+
+def _right_click(listing, position) -> None:
+    """Right-click a list's viewport at ``position``, the way the desktop does.
+
+    Both halves of a real right-click: the button press, which is what moves the
+    selection onto the row (Qt selects an unselected row on a right press), and
+    the context-menu event the platform then sends to the widget under the
+    cursor, which is what opens the menu. Qt opens these from the event rather
+    than from the press, so both are needed -- and the event is sent to the
+    viewport, where the platform would deliver it, rather than straight to the
+    list whose policy is consulted.
+    """
+    QtCore, QtGui, QtWidgets, QtTest = (
+        _qt_or_skip().QtCore,
+        _qt_or_skip().QtGui,
+        _qt_or_skip().QtWidgets,
+        _qt_or_skip().QtTest,
+    )
+    viewport = listing.viewport()
+    QtTest.QTest.mouseClick(
+        viewport,
+        QtCore.Qt.MouseButton.RightButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+        position,
+    )
+    QtWidgets.QApplication.sendEvent(
+        viewport,
+        QtGui.QContextMenuEvent(
+            QtGui.QContextMenuEvent.Reason.Mouse,
+            position,
+            viewport.mapToGlobal(position),
+        ),
+    )
+
+
+def _capture_menus(
+    monkeypatch: pytest.MonkeyPatch, pick: str | None = None
+) -> list[dict]:
+    """Record every context menu the dialog opens, picking ``pick`` from each.
+
+    Replacing the popup seam is what keeps the suite out of an event loop: the
+    menu is handed over to be read, and the named row is triggered while the
+    menu is still "open" -- the way a real click works -- so what the rows are
+    *wired to* is exercised, not only what they say.
+    """
+    seen: list[dict] = []
+
+    def record(menu, position) -> None:
+        rows = menu.actions()
+        seen.append(
+            {
+                "labels": [row.text() for row in rows],
+                "enabled": [row.isEnabled() for row in rows],
+                "position": position,
+            }
+        )
+        if pick is not None:
+            next(row for row in rows if row.text() == pick).trigger()
+
+    monkeypatch.setattr(cli.manage_panel, "_popup", record)
+    return seen
 
 
 def _open_dialog(model, monkeypatch, inspect) -> bool:
@@ -707,7 +973,7 @@ def test_dialog_builds_its_widgets(
     assert seen["recent_icons"] == [ICON_FOR_KIND[ENTRY_FOLDER]] * 2 + [
         ICON_FOR_KIND[ENTRY_FILE]
     ]
-    assert seen["pinned_icons"] == [PINNED_ICON]
+    assert seen["pinned_icons"] == [PINNED_ROW_ICON]
     # The four transfer buttons between the panes, then the footer row.
     assert seen["buttons"] == [
         LEFT_ICON,
@@ -1234,6 +1500,111 @@ def test_about_values_are_copied_from_the_package() -> None:
     about.destroy()
     parent.destroy()
     parent.destroy()
+
+
+def test_right_click_opens_the_entry_menu_in_either_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same three rows whichever pane was right-clicked.
+
+    Which of the two lists an entry is in does not change what can be done with
+    it, so the menu does not change either.
+    """
+    pinned = Pinned(tmp_path / "pinned.json")
+    pinned.pin(_entry("pinned"))
+    model = ManageModel([_entry("alpha")], pinned)
+    seen = _capture_menus(monkeypatch)
+    clicked: dict[str, object] = {}
+
+    def inspect(dialog) -> None:
+        for role in (RECENT_ROLE, PINNED_ROLE):
+            listing = _pane(dialog, role)
+            assert listing.count() == 1  # a row to right-click
+            position = listing.visualItemRect(listing.item(0)).center()
+            _right_click(listing, position)
+            clicked[role] = listing.viewport().mapToGlobal(position)
+
+    _open_dialog(model, monkeypatch, inspect)
+
+    assert list(clicked) == [RECENT_ROLE, PINNED_ROLE]
+    assert len(seen) == 2
+    for role, menu in zip((RECENT_ROLE, PINNED_ROLE), seen):
+        assert menu["labels"] == [
+            OPEN_IN_CODE_LABEL,
+            OPEN_FOLDER_LABEL,
+            COPY_PATH_LABEL,
+        ]
+        # A local entry can do all three.
+        assert menu["enabled"] == [True, True, True]
+        # Opened where the click was, not at the widget's own origin.
+        assert menu["position"] == clicked[role]
+
+
+def test_right_click_below_the_last_row_opens_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No entry under the cursor, so there is nothing to offer."""
+    QtCore = _qt_or_skip().QtCore
+    pinned = Pinned(tmp_path / "pinned.json")
+    model = ManageModel([_entry("alpha")], pinned)
+    seen = _capture_menus(monkeypatch)
+
+    def inspect(dialog) -> None:
+        listing = _pane(dialog, RECENT_ROLE)
+        last = listing.visualItemRect(listing.item(listing.count() - 1))
+        _right_click(
+            listing,
+            QtCore.QPoint(listing.viewport().width() // 2, last.bottom() + 30),
+        )
+
+    _open_dialog(model, monkeypatch, inspect)
+
+    assert seen == []
+
+
+def test_a_remote_row_is_greyed_in_the_menu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows needing a local path are disabled; the one that does not is not."""
+    remote = _entry("proj", uri="vscode-remote://ssh-remote+box/srv/proj", remote=True)
+    pinned = Pinned(tmp_path / "pinned.json")
+    model = ManageModel([remote], pinned)
+    seen = _capture_menus(monkeypatch)
+
+    def inspect(dialog) -> None:
+        listing = _pane(dialog, RECENT_ROLE)
+        _right_click(listing, listing.visualItemRect(listing.item(0)).center())
+
+    _open_dialog(model, monkeypatch, inspect)
+
+    assert seen[0]["enabled"] == [True, False, False]
+
+
+def test_a_picked_row_acts_on_the_entry_that_was_clicked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the row under the cursor decides what the menu acts on."""
+    pinned = Pinned(tmp_path / "pinned.json")
+    model = ManageModel([_entry("alpha"), _entry("beta")], pinned)
+    copied: list[str] = []
+    monkeypatch.setattr(cli.manage_panel, "_copy_to_clipboard", copied.append)
+    _capture_menus(monkeypatch, pick=COPY_PATH_LABEL)
+    seen: dict[str, object] = {}
+
+    def inspect(dialog) -> None:
+        listing = _pane(dialog, RECENT_ROLE)
+        # Row 1, not row 0, so a menu acting on the wrong row would show up.
+        _right_click(listing, listing.visualItemRect(listing.item(1)).center())
+        # Qt selects an unselected row on a right-click, so what the menu acted
+        # on and what the window shows selected are the same row.
+        seen["selected"] = _selected(listing)
+
+    changed = _open_dialog(model, monkeypatch, inspect)
+
+    assert seen["selected"] == [1]
+    assert copied == ["/beta"]
+    # Reading an entry and acting on it is not an edit: nothing to regenerate.
+    assert changed is False
 
 
 # --- the CLI wiring -------------------------------------------------------

@@ -100,7 +100,7 @@ Right-click the VS Code icon in the task manager:
 
 ```
 ──────────────────
-Recent Files:
+Recent Files:          ← click to pin, unpin and reorder
   <recent entries, newest first>
 ──────────────────
 Pinned Files: ▹          ← click to pin, unpin and reorder
@@ -108,11 +108,12 @@ Pinned Files: ▹          ← click to pin, unpin and reorder
 ──────────────────
 ```
 
-A menu separator cannot carry text, so the two block headings are real actions.
-The **Pinned Files:** heading is the one you can click: it opens the dialog, so
-there is no separate "Manage Pinned Files" entry to go looking for. Its icon is
-the manager's own — a bookmark with a plus — and it ends with the same chevron a
-submenu row carries. The **Recent Files:** heading is deliberately inert.
+A menu separator cannot carry text, so the two block headings are real actions,
+and both of them are clickable: either one opens the dialog, so there is no
+separate "Manage Pinned Files" entry to go looking for. The **Pinned Files:**
+heading carries the manager's own icon — a bookmark with a plus — and ends with
+the same chevron a submenu row carries; the **Recent Files:** heading keeps its
+clock and has no chevron.
 
 The chevron is part of the heading's text, pushed to the right edge by padding.
 A Qt menu draws each item's text from a fixed left inset, so the only way for the
@@ -232,6 +233,19 @@ pane, selection is the usual one: a click selects a row, **Ctrl**-click adds or
 removes one row, and **Shift**-click extends a range from the last row clicked
 (**Ctrl+Shift** adds that range instead of replacing the selection with it).
 
+  **Right-clicking a row** offers three things to do with that one entry:
+**Open in Code** (the way a menu click opens it), **Open Folder** — the
+directory holding it, which is the entry itself for a folder and its parent for
+a file — and **Copy Path**, the decoded path ready to paste into a shell. The
+same three rows in either pane: what can be done with an entry does not depend
+on which of the two lists it is in. The two rows that need a path *on this
+machine* are greyed out for a remote entry, which is not a rare case here — a
+folder on another host is one of the things a jump list is most useful for, and
+neither showing it nor copying ``/srv/app`` for it would mean anything locally.
+The rows stay listed greyed rather than disappearing, so the menu keeps its
+shape and the reason is visible. No row writes anything, so a right-click can
+never change the pinned entries or dirty the dialog.
+
   The **icons are the menu's own**: the pane headings reuse the jump-list
   captions' icons (`clock` for recents, `bookmark-new` for pinned) and every row
   shows the icon behind it — a folder or a document by kind, a star for anything
@@ -279,13 +293,33 @@ happens in that dialog rather than in the menu itself.
   on the right (pin), each named in its tooltip — so an arrow never moves
   entries away from where it points, and nothing about the layout depends on a
   setting.
+- The context-menu policy is set on the **entry list**, not on its viewport.
+  The platform delivers the context-menu event to the viewport, which ignores it
+  under its default policy, and Qt then hands it to the scroll area — so a policy
+  set on the viewport is never consulted and the menu simply never opens. The
+  position that arrives is in the viewport's coordinates, which is what
+  `itemAt()` and the popup both take. (Measured against Qt 6.10.2, not assumed.)
+- "Open Folder" goes through `xdg-open` rather than naming a file manager, the
+  way every other action goes through the CLI rather than naming an editor: on
+  this desktop it resolves to `org.kde.dolphin.desktop`, and on a session that
+  picked something else it resolves to that. The directory is not checked for
+  existence first — the desktop reports a path that is gone — and the path is
+  the decoded one, so a project named `My Projects` opens and copies as itself.
+- Every context-menu row is read-only, and "Copy Path" is the only one that is
+  not a subprocess: the clipboard belongs to the running `QApplication`, which is
+  another reason the application is kept alive at module scope in `qtview.py`.
+  A Wayland or X11 clipboard is served by the process that filled it.
 - The `Pinned Files:` / `Recent Files:` headings are real actions, because a
-  menu separator cannot carry text. The pinned one is what opens the dialog —
-  so it is always present, even with nothing pinned, and carries the manager's
-  `bookmark-new` icon. The recents one is inert (`/bin/true`) and appears only
-  when there are recents to head. Pinned entries use Breeze's outline star
-  (`non-starred`) and the recents heading uses `clock`, so a heading is never
-  mistaken for an entry or for the other heading.
+  menu separator cannot carry text, and both open the dialog. The pinned one is
+  the one the menu can never do without — it is always present, even with
+  nothing pinned, so there is always something to click — and it carries the
+  manager's `bookmark-new` icon. The recents one appears only when there are
+  recents to head, and carries `clock`. Pinned entries in the **menu** use
+  Breeze's filled star (`starred`), so a heading is never mistaken for an entry
+  or for the other heading; the **dialog** draws the outline star
+  (`manage.PINNED_ROW_ICON`, `non-starred`) on its own pinned rows. That is the
+  one icon the two surfaces deliberately disagree on, and they are separate
+  constants so either can be changed without dragging the other along.
 - The launcher written into each action's `Exec=` is verified before use, so a
   menu entry cannot silently do nothing. `make install` resolves it to the one
   self-contained file: `Exec=/home/you/.local/bin/kde-vscode-jumplist open <id>`.

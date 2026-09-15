@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
+
+# The scheme a URI uses when it names something on this machine.
+LOCAL_SCHEME = "file"
+# Authorities that still mean "this machine". ``file://localhost/x`` is the one
+# legal spelling of a local file URI that carries an authority at all; anything
+# else (``file://buildhost/x``) names another machine's filesystem.
+LOCAL_AUTHORITIES = frozenset({"", "localhost"})
 
 
 def uri_from_stored(value: object) -> str | None:
@@ -48,3 +56,30 @@ def uri_display_name(uri: str) -> str:
     if parts.netloc:
         return parts.netloc
     return uri
+
+
+def local_path(uri: str) -> Path | None:
+    """The file on this machine a URI names, or ``None`` when it names none.
+
+    Only a ``file:`` URI has one. A remote entry's path is a path on *another*
+    machine, so it is deliberately not returned: writing ``/srv/app`` on the
+    clipboard for something that lives on a build host would look like a local
+    path and be wrong, and there is nothing on this machine to show in a file
+    manager either. Callers use ``None`` to grey out the rows that would need
+    one rather than to guess.
+
+    The percent-encoding is decoded, so the result is a path that can be handed
+    to a file manager or pasted into a shell as it stands.
+    """
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return None
+    if parts.scheme != LOCAL_SCHEME or parts.netloc not in LOCAL_AUTHORITIES:
+        return None
+    path = unquote(parts.path or "")
+    # A file URI is absolute by definition (RFC 8089); a relative one is not
+    # something to resolve against whatever directory this happens to run in.
+    if not path.startswith("/"):
+        return None
+    return Path(path)

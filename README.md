@@ -15,8 +15,8 @@ entries in the right, and the four buttons between them](screenshots/manage_pinn
 
 The **Pinned Files: ▹** heading is itself the way into that window — click it to
 pin, unpin and reorder — so there is no separate entry to go hunting for further
-down the menu. Pinned entries carry a hollow star, which is what marks them out
-from the recents at a glance.
+down the menu. Pinned entries carry a star, which is what marks them out from
+the recents at a glance.
 
 The menu holds up to twelve entries in all: the recents newest-first, then the
 pinned entries in the order you arranged them. Workspaces are left out of the

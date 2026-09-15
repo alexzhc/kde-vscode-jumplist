@@ -6,7 +6,7 @@ Commands:
   pin       pin an entry
   unpin     unpin an entry
   pinned    list pinned entries
-  manage    open the pin dialog (also the menu's "Pinned Files:" heading)
+  manage    open the pin dialog (also both of the menu's headings)
   open      resolve an entry ID and launch it (used by the menu actions)
   install / uninstall  set up or remove the systemd user units
   reset     restore the generated desktop entry from the vendor file
