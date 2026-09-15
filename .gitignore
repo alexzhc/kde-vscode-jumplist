@@ -4,7 +4,6 @@ __pycache__/
 build/
 dist/
 bin/
-.tmp/
 .pytest_cache/
 .venv/
 *.vscdb-journal

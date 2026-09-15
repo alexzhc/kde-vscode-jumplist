@@ -43,98 +43,18 @@ def test_corrupt_pinned_file_ignored(tmp_path: Path) -> None:
     assert Pinned(path).all() == []
 
 
-# --- reading a list written before the "favorites" rename ------------------
-#
-# The file, and the key inside it, were both called "favorites" once. An
-# installed copy is upgraded in place, so whatever is already on disk has to
-# keep working -- and, just as important, keeps existing: these tests are as
-# much about what reading must *not* do to the user's file.
+def test_a_file_under_another_name_is_not_read(tmp_path: Path) -> None:
+    """Only ``pinned.json`` is the list; a similarly named file is not ours.
 
-
-def _legacy_payload(items: list[dict]) -> str:
-    return json.dumps({"version": 1, "favorites": items})
-
-
-def test_reads_a_file_left_under_the_old_name(tmp_path: Path) -> None:
-    """An upgrade must not look like having pinned nothing."""
-    entry = _entry("file:///home/user/kept")
-    legacy = tmp_path / "favorites.json"
-    legacy.write_text(_legacy_payload([entry.to_dict()]), encoding="utf-8")
-
-    assert Pinned(tmp_path / "pinned.json").all() == [entry]
-
-
-def test_the_old_file_is_left_where_it_is(tmp_path: Path) -> None:
-    """Reading must never move the user's data.
-
-    Regression: the file used to be renamed on load. The watcher builds a
-    Pinned on every pass, so a rename there is a write to the user's data from
-    a pure read -- and with two processes it is how a list gets replaced by
-    whichever of them wrote last.
+    The name is the whole of the agreement about where the list lives, so a
+    file called something else -- whatever it contains -- is left alone.
     """
-    entry = _entry("file:///home/user/kept")
-    legacy = tmp_path / "favorites.json"
-    legacy.write_text(_legacy_payload([entry.to_dict()]), encoding="utf-8")
-
-    for _ in range(3):  # loading repeatedly changes nothing either
-        Pinned(tmp_path / "pinned.json")
-
-    assert legacy.is_file()
-    assert not (tmp_path / "pinned.json").exists()
-
-
-def test_reading_the_old_key_of_the_current_name(tmp_path: Path) -> None:
-    """The key was renamed too, and the two are independent details."""
-    entry = _entry("file:///home/user/kept")
-    path = tmp_path / "pinned.json"
-    path.write_text(_legacy_payload([entry.to_dict()]), encoding="utf-8")
-
-    assert Pinned(path).all() == [entry]
-
-
-def test_the_new_key_wins_when_both_are_present(tmp_path: Path) -> None:
-    old = _entry("file:///home/user/old")
-    new = _entry("file:///home/user/new")
-    path = tmp_path / "pinned.json"
-    path.write_text(
-        json.dumps({"version": 1, "favorites": [old.to_dict()], "pinned": [new.to_dict()]}),
-        encoding="utf-8",
-    )
-
-    assert Pinned(path).all() == [new]
-
-
-def test_the_current_name_wins_over_the_old_one(tmp_path: Path) -> None:
-    """Once the new file exists it is the list; the old one is not merged in."""
-    old = _entry("file:///home/user/old")
-    new = _entry("file:///home/user/new")
+    entry = _entry("file:///home/user/other")
     (tmp_path / "favorites.json").write_text(
-        _legacy_payload([old.to_dict()]), encoding="utf-8"
+        json.dumps({"version": 1, "favorites": [entry.to_dict()]}), encoding="utf-8"
     )
-    path = tmp_path / "pinned.json"
-    path.write_text(json.dumps({"version": 1, "pinned": [new.to_dict()]}), encoding="utf-8")
 
-    assert Pinned(path).all() == [new]
-
-
-def test_a_change_writes_the_new_name_and_keeps_the_old_file(tmp_path: Path) -> None:
-    """The upgrade happens on the first change, not on the first read."""
-    kept = _entry("file:///home/user/kept")
-    added = _entry("file:///home/user/added")
-    legacy = tmp_path / "favorites.json"
-    legacy.write_text(_legacy_payload([kept.to_dict()]), encoding="utf-8")
-
-    path = tmp_path / "pinned.json"
-    pinned = Pinned(path)
-    pinned.pin(added)
-
-    # Both entries are in the new file, so nothing the old one held was lost by
-    # writing to the new name.
-    assert [e.uri for e in Pinned(path).all()] == [kept.uri, added.uri]
-    assert json.loads(path.read_text(encoding="utf-8"))["pinned"]
-    # And the old file is untouched, so the user can see where it went.
-    assert legacy.is_file()
-    assert json.loads(legacy.read_text(encoding="utf-8"))["favorites"]
+    assert Pinned(tmp_path / "pinned.json").all() == []
 
 
 def test_entry_store_roundtrip(tmp_path: Path) -> None:

@@ -7,6 +7,6 @@ __author__ = "alexzhc"
 __url__ = "https://github.com/alexzhc/kde-vscode-jumplist"
 
 # Name of the program and of the directories it keeps under $XDG_CONFIG_HOME and
-# $XDG_BIN_HOME. Defined here because both paths.py and config.py need it, and
+# $XDG_BIN_HOME. Defined here because paths.py and xdg.py both need it, and
 # either importing the other would be a cycle.
 APP_NAME = "kde-vscode-jumplist"

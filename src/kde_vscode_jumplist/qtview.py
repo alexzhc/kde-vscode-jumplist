@@ -1,13 +1,13 @@
-"""The Qt plumbing the two dialogs share.
+"""The Qt plumbing the pinned-entries manager is built from.
 
-Both the pinned-entries manager and the settings window are Qt windows that have
-to look like the rest of the desktop, and both are optional: the CLI imports and
-every other command works on a machine without PyQt6, so Qt is imported lazily
-and a missing binding is reported rather than raised. That much is common, and
-it lives here instead of being duplicated.
+The manager is a Qt window that has to look like the rest of the desktop, and
+it is optional: the CLI imports and every other command works on a machine
+without PyQt6, so Qt is imported lazily and a missing binding is reported rather
+than raised. That much is common, and it lives here instead of in the dialog
+module.
 
-Nothing here knows what either dialog is for -- no entries, no settings, no
-layout beyond what a window needs to exist.
+Nothing here knows what the dialog is for -- no entries, no layout beyond what a
+window needs to exist.
 """
 
 from __future__ import annotations

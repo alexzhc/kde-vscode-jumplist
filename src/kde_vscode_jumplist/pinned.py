@@ -16,19 +16,8 @@ from .util import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-# What this file, and the key inside it, were called before "favorites" became
-# "pinned". An upgrade must not look like having pinned nothing, so both are
-# still read: the old file name, and the old key inside either file.
-#
-# Reading is deliberately *all* that happens to them. A read must never move or
-# delete a file the user owns -- two processes loading at once, or one that has
-# already loaded and then writes, is enough to turn a rename into lost entries,
-# and the list is hand-curated. The new name is written by the next change
-# (pin, unpin or reorder), and the old file is then simply left alone; it is
-# only ever consulted when the current file does not exist.
+# The key the list is stored under inside the file.
 PINNED_JSON_KEY = "pinned"
-LEGACY_FILE_NAME = "favorites.json"
-LEGACY_JSON_KEY = "favorites"
 
 
 class Pinned:
@@ -38,46 +27,25 @@ class Pinned:
         self._order: list[str] = []
         self.load()
 
-    def _source_path(self) -> Path | None:
-        """The file to read, or ``None`` when there is nothing to read.
-
-        A file left under the pre-rename name is read where it lies. It is
-        never renamed into place: this runs on every watcher pass, and moving
-        the user's data as a side effect of *reading* it is how a list ends up
-        overwritten by whichever process wrote last.
-        """
-        if self._path.is_file():
-            return self._path
-        legacy = self._path.with_name(LEGACY_FILE_NAME)
-        if legacy.is_file():
-            log.warning(
-                "reading %s, which was called %s before the rename; it is left "
-                "where it is and the next change writes %s",
-                legacy,
-                LEGACY_FILE_NAME,
-                self._path.name,
-            )
-            return legacy
-        return None
-
     def load(self) -> None:
+        """Read the list from disk, replacing whatever is in memory.
+
+        A read never writes. This runs on every watcher pass, so moving or
+        deleting the user's own file as a side effect of reading it is how a
+        list ends up replaced by whichever process wrote last.
+        """
         self._by_id.clear()
         self._order.clear()
-        path = self._source_path()
-        if path is None:
+        if not self._path.is_file():
             return
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
-            log.warning("cannot read pinned %s: %s", path, error)
+            log.warning("cannot read pinned %s: %s", self._path, error)
             return
         if not isinstance(data, dict):
             return
-        items = data.get(PINNED_JSON_KEY)
-        if items is None:
-            # Written before the rename, which stored them under the old key.
-            items = data.get(LEGACY_JSON_KEY, [])
-        for item in items:
+        for item in data.get(PINNED_JSON_KEY, []):
             if not isinstance(item, dict):
                 continue
             try:

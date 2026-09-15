@@ -83,28 +83,16 @@ def test_bundled_tabulate_is_actually_used(tmp_path: Path) -> None:
     """A table, not the tab-separated fallback: tabulate was bundled correctly."""
     module = _build_module()
     output = module.build(tmp_path / "kde-vscode-jumplist")
-    # The archive is run with no environment at all, so the configuration file
-    # has to be named on the command line -- which is what a menu action does.
-    # Every setting is required, and both paths point inside tmp_path so the
-    # run cannot reach the real home directory.
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        f'data_dir = "{tmp_path / "data"}"\n'
-        f'apps_dir = "{tmp_path / "applications"}"\n'
-        'vscode_dir = ""\n'
-        'state_db = ""\n'
-        'shared_db = ""\n'
-        'desktop = ""\n'
-        'exec = ""\n'
-        "max_recents = 10\n"
-        "exclude_kinds = []\n"
-        'pinned_position = "above"\n',
-        encoding="utf-8",
-    )
-
+    # The archive is run with no ambient environment at all, so the XDG dirs are
+    # given explicitly: the tool's own files then stay inside tmp_path instead of
+    # reaching the real home directory.
     result = subprocess.run(  # noqa: S603 - argv list, no shell
-        [str(output), "--config", str(config_file), "pinned"],
-        env={},
+        [str(output), "pinned"],
+        env={
+            "HOME": str(tmp_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+        },
         capture_output=True,
         text=True,
         check=False,

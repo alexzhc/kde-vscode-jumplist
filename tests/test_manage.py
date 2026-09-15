@@ -44,7 +44,6 @@ from kde_vscode_jumplist.manage import (
     DOWN_ICON,
     DOWN_LABEL,
     DOWN_TOOLTIP,
-    ENTRY_ID_ROLE,
     ICON_NAME_PROPERTY,
     ICON_NAME_ROLE,
     LEFT_ICON,
@@ -78,7 +77,6 @@ from kde_vscode_jumplist.models import (
     MenuEntry,
 )
 from kde_vscode_jumplist.qtview import PLATFORM_THEME
-from kde_vscode_jumplist.settings import SETTINGS_LABEL
 from kde_vscode_jumplist import APP_NAME
 
 
@@ -441,9 +439,9 @@ def _pane_widget(dialog, role: str):
 def _pane(dialog, role: str):
     """The entry list inside one pane.
 
-    By role rather than by position: which pane is on the left follows
-    ``pinned_position``, so a test that said ``lists[0]`` would be asserting one
-    configuration's layout while pretending to test behaviour.
+    By role rather than by position: each pane carries its role from the model
+    that filled it, so the test asks for "the pinned pane" rather than for the
+    right-hand one, and the panes stay recognisable whatever the layout does.
     """
     return _pane_widget(dialog, role).findChild(_qt_or_skip().QtWidgets.QListWidget)
 
@@ -675,15 +673,13 @@ def test_dialog_builds_its_widgets(
         # result is the point.
         about = buttons[ABOUT_BUTTON_LABEL].mapTo(dialog, QtCore.QPoint(0, 0))
         close = buttons[CLOSE_BUTTON_LABEL].mapTo(dialog, QtCore.QPoint(0, 0))
-        settings = buttons[SETTINGS_LABEL].mapTo(dialog, QtCore.QPoint(0, 0))
         panes = recents.mapTo(dialog, QtCore.QPoint(0, 0))
         seen["layout"] = {
             "about_x": about.x(),
-            "settings_x": settings.x(),
             "close_x": close.x(),
             "close_right": close.x() + buttons[CLOSE_BUTTON_LABEL].width(),
             "width": dialog.width(),
-            "same_row": about.y() == close.y() == settings.y(),
+            "same_row": about.y() == close.y(),
             "below_the_panes": about.y() > panes.y(),
         }
 
@@ -718,7 +714,6 @@ def test_dialog_builds_its_widgets(
         RIGHT_ICON,
         UP_ICON,
         DOWN_ICON,
-        SETTINGS_LABEL,
         ABOUT_BUTTON_LABEL,
         CLOSE_BUTTON_LABEL,
     ]
@@ -732,7 +727,6 @@ def test_dialog_builds_its_widgets(
     } == {PIN_TOOLTIP, UNPIN_TOOLTIP}
     assert seen["tooltips"][UP_ICON] == UP_TOOLTIP
     assert seen["tooltips"][DOWN_ICON] == DOWN_TOOLTIP
-    assert seen["tooltips"][SETTINGS_LABEL] == ""
     assert seen["tooltips"][ABOUT_BUTTON_LABEL] == ""
     assert seen["tooltips"][CLOSE_BUTTON_LABEL] == ""
     assert seen["sizes"] == {
@@ -742,8 +736,8 @@ def test_dialog_builds_its_widgets(
     layout = seen["layout"]
     assert layout["same_row"] is True
     assert layout["below_the_panes"] is True
-    # Settings sits left of About, and both are left of Close.
-    assert layout["settings_x"] < layout["about_x"] < layout["close_x"]
+    # About sits at the left edge, Close at the right.
+    assert layout["about_x"] < layout["close_x"]
     assert layout["close_right"] <= layout["width"]
     # The rows must be laid out, not merely present in the view.
     assert seen["drawn"] == [True] * 4
@@ -751,25 +745,14 @@ def test_dialog_builds_its_widgets(
     assert seen["filtered_drawn"] is True
 
 
-@pytest.mark.parametrize(
-    "position, pinned_first",
-    [("above", True), ("below", False)],
-)
-def test_pane_order_follows_the_menu(
-    write_config: WriteConfig,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    position: str,
-    pinned_first: bool,
+def test_recents_pane_is_on_the_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two panes are laid out in the order the menu lists them.
+    """The recents are always on the left, the pinned entries always on the right.
 
-    The menu lists its blocks top to bottom, the dialog lists them left to
-    right, and both read ``pinned_position`` -- so the dialog reads the way the
-    menu it was opened from does, whichever order that is.
+    The same order the menu lists its two blocks in, so the dialog reads the
+    way the menu it was opened from does.
     """
-    write_config(pinned_position=position)
-
     pinned = Pinned(tmp_path / "pinned.json")
     pinned.pin(_entry("pinned"))
     model = ManageModel([_entry("alpha")], pinned)
@@ -780,68 +763,44 @@ def test_pane_order_follows_the_menu(
 
     _open_dialog(model, monkeypatch, inspect)
 
-    left, right = seen["x"][RECENT_ROLE], seen["x"][PINNED_ROLE]
-    assert left != right
-    if pinned_first:
-        assert right < left, "pinned_position = above puts the pinned pane first"
-    else:
-        assert left < right, "pinned_position = below puts the recents pane first"
+    assert seen["x"][RECENT_ROLE] < seen["x"][PINNED_ROLE]
 
 
-@pytest.mark.parametrize(
-    "position, pinned_first",
-    [("above", True), ("below", False)],
-)
 def test_transfer_buttons_point_at_their_destination(
-    write_config: WriteConfig,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    position: str,
-    pinned_first: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each transfer arrow moves in the direction it points.
 
-    Which pane is on the left decides the action, so pinning is the rightward
-    move in one layout and the leftward move in the other; what must never
-    change is that the arrow and the list its tooltip names are on the same
-    side. A ``<`` that pinned in one layout and unpinned in the other would be
-    worse than either order.
+    The panes are fixed, so the arrows are too: ``<`` sends the selection back
+    to the recents pane on the left (unpin) and ``>`` sends it to the pinned
+    pane on the right (pin), each with a tooltip naming the list it reaches.
     """
-    write_config(pinned_position=position)
-
     pinned = Pinned(tmp_path / "pinned.json")
     pinned.pin(_entry("pinned"))
     model = ManageModel([_entry("alpha"), _entry("beta")], pinned)
     seen: dict[str, object] = {}
 
     def inspect(dialog) -> None:
-        seen["actions"] = {
-            LEFT_ICON: _button(dialog, PIN_ACTION),
-            RIGHT_ICON: _button(dialog, UNPIN_ACTION),
-        }
+        buttons = _buttons(dialog)
+        seen["left"] = buttons[LEFT_ICON]
+        seen["right"] = buttons[RIGHT_ICON]
 
     _open_dialog(model, monkeypatch, inspect)
 
-    pin_button, unpin_button = seen["actions"][LEFT_ICON], seen["actions"][RIGHT_ICON]
-    # Whichever button carries pinning, it is the one pointing at the pinned
-    # pane, and its tooltip names that pane.
-    assert (pin_button.property(BUTTON_ACTION_PROPERTY) == PIN_ACTION) is True
-    assert unpin_button.property(BUTTON_ACTION_PROPERTY) == UNPIN_ACTION
-    assert pin_button.toolTip() == PIN_TOOLTIP
-    assert unpin_button.toolTip() == UNPIN_TOOLTIP
-    assert pin_button.property(ICON_NAME_PROPERTY) == (
-        LEFT_ICON if pinned_first else RIGHT_ICON
-    )
-    # And the tooltips agree with the panes they name.
-    assert pin_button.toolTip() != unpin_button.toolTip()
+    left, right = seen["left"], seen["right"]
+    assert left.property(BUTTON_ACTION_PROPERTY) == UNPIN_ACTION
+    assert right.property(BUTTON_ACTION_PROPERTY) == PIN_ACTION
+    assert left.toolTip() == UNPIN_TOOLTIP
+    assert right.toolTip() == PIN_TOOLTIP
+    # The arrow is drawn on the side it sends entries to.
+    assert left.property(ICON_NAME_PROPERTY) == LEFT_ICON
+    assert right.property(ICON_NAME_PROPERTY) == RIGHT_ICON
 
 
-def test_pinning_works_whichever_side_the_pane_is_on(
-    write_config: WriteConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_pinning_moves_entries_from_left_to_right(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The action is found by what it does, so the layout cannot break it."""
-    write_config(pinned_position="above")  # pinned on the left, pinning is "send left"
-
+    """The pin button takes the selected recents over to the pinned pane."""
     pinned = Pinned(tmp_path / "pinned.json")
     model = ManageModel([_entry("alpha")], pinned)
     seen: dict[str, object] = {}
@@ -858,36 +817,6 @@ def test_pinning_works_whichever_side_the_pane_is_on(
     assert seen["recent"] == ["alpha"]  # the recents pane never changes
     assert changed is True
     assert [e.label for e in pinned.all()] == ["alpha"]
-
-
-@pytest.mark.parametrize("settings_changed", [True, False])
-def test_a_settings_change_regenerates_the_menu(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings_changed: bool
-) -> None:
-    """The settings decide how the menu is built, so changing them rebuilds it.
-
-    Through the same dirty flag a pinned change uses, which is what the caller
-    already watches -- and this is what connects the footer button to it.
-    """
-    calls: list[str] = []
-
-    def fake_settings(_parent=None) -> bool:
-        calls.append("settings")
-        return settings_changed
-
-    monkeypatch.setattr(cli.manage_panel, "run_settings_dialog", fake_settings)
-
-    pinned = Pinned(tmp_path / "pinned.json")
-    model = ManageModel([_entry("alpha")], pinned)
-
-    def inspect(dialog) -> None:
-        _buttons(dialog)[SETTINGS_LABEL].click()
-
-    changed = _open_dialog(model, monkeypatch, inspect)
-
-    assert calls == ["settings"]  # the button opens the window...
-    assert model.dirty is settings_changed  # ...and only a change marks the menu stale
-    assert changed is settings_changed
 
 
 def test_dialog_icons_are_drawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

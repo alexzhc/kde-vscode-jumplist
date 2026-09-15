@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Dynamic KDE Plasma task manager jump lists for VS Code recent files, folders and remotes"
 readme = "README.md"
 license = { text = "Apache-2.0" }
-# 3.11 is where `tomllib` entered the standard library. config.toml is read with
-# it, and an older interpreter would need a dependency to parse its own settings.
+# 3.11 is the floor the code is written against (`tomllib` in the test suite, and
+# the type-parameter syntax used throughout).
 requires-python = ">=3.11"
 authors = [{ name = "alexzhc" }]
 keywords = ["kde", "plasma", "vscode", "jump-list", "task-manager", "pinned"]

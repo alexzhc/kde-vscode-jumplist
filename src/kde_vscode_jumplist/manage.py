@@ -1,13 +1,12 @@
 """Interactive editor for the pinned entries.
 
-This is what the jump list's "Manage Pinned Files…" action opens. The layout is
+This is what the jump list's "Pinned Files:" heading opens. The layout is
 the two-pane box fcitx5's input-method configuration uses: every recent VS Code
-entry in one pane, the pinned subset the menu lists in the other, and the four
-buttons between them. **Which pane is on the left follows `pinned_position`**,
-the setting that also orders the menu, so the dialog reads the way the menu it
-was opened from does -- the menu lists its blocks top to bottom, the dialog left
-to right. The two transfer arrows point at the pane they send entries to, so
-pinning is the rightward move in one layout and the leftward move in the other.
+entry in the left pane, the pinned subset the menu lists in the right, and the
+four buttons between them. The recents are on the left and the pinned entries on
+the right, the order the menu itself lists them in. The two transfer arrows
+point at the pane they send entries to, so `>` pins the selected recents and `<`
+unpins the selected pinned entries.
 
 The two panes are independent views rather than a transfer box. `>` adds the
 selected recents to the pinned entries and `<` removes the selected pinned
@@ -34,20 +33,13 @@ surface rather than reaching the session through XWayland. On top of that, the
 KDE platform theme gives the window the desktop's own Breeze style and, more to
 the point, resolves the theme's icon names -- which are the same names the jump
 list uses.
-
-Earlier versions drew this with GTK 3, in this same two-pane shape. GTK needed
-its own (Breeze GTK) theme to look like a KDE window at all, and GTK 3 has no
-extended selection mode -- its ``MULTIPLE`` mode *adds* to the selection on a
-plain click -- so the whole click handling had to be written and tested by hand
-here. Those two are why it is now Qt.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from . import APP_NAME, __author__, __url__, __version__
-from . import desktop_entry
 from .desktop_entry import (
     DEFAULT_ICON,
     PINNED_CAPTION_ICON,
@@ -58,6 +50,8 @@ from .desktop_entry import (
 from .models import MenuEntry
 from .pinned import Pinned
 from .qtview import (
+    # Re-exported: callers catch the dialog's own module attribute rather than
+    # reaching past it into qtview, since this is the dialog it belongs to.
     DialogUnavailable,
     exec_dialog,
     themed_icon as _themed_icon,
@@ -66,7 +60,6 @@ from .qtview import application as _application
 from .qtview import load_qt as _load_qt
 from .qtview import require_display as _require_display
 from .qtview import use_platform_theme as _use_platform_theme
-from .settings import SETTINGS_ICON, SETTINGS_LABEL, run_settings_dialog
 
 WINDOW_TITLE = "Manage Pinned Files"
 
@@ -96,24 +89,18 @@ ICON_NAME_ROLE = 1
 # (the tests do). A QIcon has no name, and a pixmap is not worth comparing.
 ICON_NAME_PROPERTY = "iconName"
 PANE_TITLE_PROPERTY = "paneTitle"
-# Which of the two lists a pane holds, and which transfer a button performs. Both
-# are recorded rather than inferred from position, because ``pinned_position``
-# decides which pane is on the left and the transfer buttons swap meaning with
-# it.
+# Which of the two lists a pane holds, and which transfer a button performs.
+# Both are recorded rather than inferred from position, so the enabling code
+# and the tests can ask for "the pin button" or "the pinned pane" by name.
 PANE_ROLE_PROPERTY = "paneRole"
 BUTTON_ACTION_PROPERTY = "buttonAction"
 RECENT_ROLE = "recent"
 PINNED_ROLE = "pinned"
 
 # The transfer buttons, top to bottom between the two panes. The horizontal
-# pair sends the selection to the pane its arrow points at; the vertical pair
+# pair sends the selection to the pane its arrow points at -- "<" to the recents
+# on the left, ">" to the pinned entries on the right; the vertical pair
 # reorders the pinned entries, which is also the order the menu lists them in.
-#
-# The two horizontal buttons are named for the *direction* they send entries,
-# not for pinning: which pane sits on the left follows ``pinned_position``, so
-# reaching the pinned list is the rightward move in one layout and the leftward
-# move in the other. The arrow is the direction, the tooltip names the list it
-# sends to, and both travel with the button that ends up doing it.
 #
 # They are drawn with the theme's own arrows rather than as text glyphs, so they
 # match the rest of the desktop the way fcitx5's list boxes do. The labels are
@@ -530,17 +517,6 @@ def _build_dialog(model: ManageModel):
     )
     panes.update({RECENT_ROLE: recent_list, PINNED_ROLE: pinned_list})
 
-    # Which pane sits on the left follows `pinned_position`, the same setting
-    # that orders the menu, so the dialog reads the way the menu it was opened
-    # from does: the menu lists its two blocks top to bottom, this lists them
-    # left to right. Sending entries towards the pinned list is the pin, so that
-    # -- and the tooltip naming the destination -- is what travels with the
-    # pane, while each arrow keeps pointing the way the entries go.
-    pinned_first = not desktop_entry.pinned_below_recents()
-    left_action, right_action = (
-        (PIN_ACTION, UNPIN_ACTION) if pinned_first else (UNPIN_ACTION, PIN_ACTION)
-    )
-
     def selected(key: str) -> list[MenuEntry]:
         """The entries selected in one pane, in the order the pane lists them."""
         chosen = {
@@ -628,12 +604,12 @@ def _build_dialog(model: ManageModel):
     middle = QtWidgets.QVBoxLayout()
     middle.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
-    # The arrows are the directions, so the left one is always the left one; what
-    # the layout decides is the action it carries and the list its tooltip names.
-    # The action is recorded on the button so the enabling code and the tests can
-    # ask for "the pin button" without knowing which side that is.
+    # The arrows keep pointing the way their entries travel: "<" back to the
+    # recents on the left, ">" over to the pinned entries on the right. The
+    # action is recorded on the button so the enabling code and the tests can
+    # ask for "the pin button" rather than for the right-hand one.
     def transfer_button(is_left: bool) -> object:
-        action = left_action if is_left else right_action
+        action = UNPIN_ACTION if is_left else PIN_ACTION
         button = _middle_button(
             LEFT_ICON if is_left else RIGHT_ICON,
             LEFT_LABEL if is_left else RIGHT_LABEL,
@@ -642,13 +618,11 @@ def _build_dialog(model: ManageModel):
             QtWidgets,
         )
         button.setProperty(BUTTON_ACTION_PROPERTY, action)
-        button.clicked.connect(
-            transfer_pin if action == PIN_ACTION else transfer_unpin
-        )
+        button.clicked.connect(transfer_unpin if is_left else transfer_pin)
         return button
 
     left_button, right_button = transfer_button(True), transfer_button(False)
-    button_for = {left_action: left_button, right_action: right_button}
+    button_for = {UNPIN_ACTION: left_button, PIN_ACTION: right_button}
     up_button = _middle_button(UP_ICON, UP_LABEL, UP_TOOLTIP, QtGui, QtWidgets)
     down_button = _middle_button(DOWN_ICON, DOWN_LABEL, DOWN_TOOLTIP, QtGui, QtWidgets)
     up_button.clicked.connect(lambda: reorder(-1))
@@ -656,38 +630,22 @@ def _build_dialog(model: ManageModel):
     for button in (left_button, right_button, up_button, down_button):
         middle.addWidget(button)
 
-    body.addWidget(pinned_pane if pinned_first else recent_pane, 1)
+    # Recents on the left, pinned on the right: the order the menu lists its two
+    # blocks in, and the direction the transfer arrows point.
+    body.addWidget(recent_pane, 1)
     body.addLayout(middle)
-    body.addWidget(recent_pane if pinned_first else pinned_pane, 1)
+    body.addWidget(pinned_pane, 1)
 
-    # One row spanning the window: Settings and About at the left edge, Close at
-    # the right.
+    # One row spanning the window: About at the left edge, Close at the right.
     footer = QtWidgets.QHBoxLayout()
-    settings_button = QtWidgets.QPushButton(SETTINGS_LABEL)
-    settings_icon = _themed_icon(SETTINGS_ICON, ROW_ICON_SIZE, QtGui)
-    if not settings_icon.isNull():
-        settings_button.setIcon(settings_icon)
     about_button = QtWidgets.QPushButton(ABOUT_BUTTON_LABEL)
     about_button.clicked.connect(lambda: build_about_dialog(dialog).exec())
     close_button = QtWidgets.QPushButton(CLOSE_BUTTON_LABEL)
     close_button.clicked.connect(dialog.accept)
-    footer.addWidget(settings_button)
     footer.addWidget(about_button)
     footer.addStretch(1)
     footer.addWidget(close_button)
     outer.addLayout(footer)
-
-    def open_settings() -> None:
-        """Show the settings window, and regenerate the menu if it changed.
-
-        Through the model's own dirty flag, which is what the caller already
-        watches: the settings decide how the menu is built, so a change to them
-        needs the same regeneration a change to the pinned entries does.
-        """
-        if run_settings_dialog(dialog):
-            model.dirty = True
-
-    settings_button.clicked.connect(open_settings)
 
     for key, listing in panes.items():
         listing.itemSelectionChanged.connect(lambda key=key: on_selection_changed(key))

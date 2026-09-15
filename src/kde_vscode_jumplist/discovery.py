@@ -11,7 +11,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config
 from .desktop_entry import is_generated
 from .paths import user_applications_dir
 from .xdg import xdg_data_dirs, xdg_data_home
@@ -80,8 +79,8 @@ def _find_executable(names: tuple[str, ...]) -> str | None:
 
 def _find_desktop_file(candidates: tuple[str, ...]) -> Path | None:
     # The user's own applications directory first, then the system data dirs.
-    # xdg_data_home() rather than the path helper alone: when APPS_DIR points
-    # somewhere else, the standard location still holds the vendor file.
+    # xdg_data_home() alongside the path helper: both point at the same place,
+    # and the standard location is searched either way.
     user_dirs = [user_applications_dir()]
     xdg_user = xdg_data_home() / "applications"
     if xdg_user not in user_dirs:
@@ -102,11 +101,10 @@ def _find_desktop_file(candidates: tuple[str, ...]) -> Path | None:
 
 
 def _state_db_for(variant: str) -> Path | None:
-    """Profile database for a variant, by auto-detection only.
+    """Profile database for a variant, by auto-detection.
 
-    Deliberately ignores the configured ``vscode_dir``: this is the detection
-    path, and honouring the setting here is what would stop the "fall back to
-    detection" retry from ever finding anything.
+    A database is only returned when it exists, so an installation is only
+    reported when there is really something to read.
     """
     home = Path.home()
     user_data = USER_DATA_DIRS.get(variant)
@@ -120,16 +118,6 @@ def _state_db_for(variant: str) -> Path | None:
         if db.is_file():
             return db
     return None
-
-
-def _vscode_data_dir_override() -> Path | None:
-    """The configured ``vscode_dir``: a VS Code user data directory.
-
-    Set it when VS Code keeps its data somewhere non-standard. It replaces
-    auto-detection for the main variant, so a pointed-at directory is used as
-    written instead of being merged with the usual candidates.
-    """
-    return config.current().vscode_dir
 
 
 def _shared_state_db_for(variant: str) -> Path | None:
@@ -173,67 +161,13 @@ def _flatpak_installation(variant: str) -> Installation | None:
     )
 
 
-def _override_installation() -> Installation | None:
-    """An installation described by the configuration's VS Code settings.
-
-    ``vscode_dir`` supplies the profile data directory (the one holding
-    ``User/globalStorage/state.vscdb``); ``state_db`` and ``shared_db`` name the
-    two databases outright and win over it.
-
-    The shared database is still discovered normally: VS Code keeps it outside
-    the profile directory (``~/.vscode-shared``), and on many installs -- this
-    one included -- *that* is where the recent list actually lives. Ignoring it
-    because a data directory was given would quietly empty the menu.
-    """
-    settings = config.current()
-    data_dir = settings.vscode_dir
-    state_db = settings.state_db
-    if state_db is None and data_dir is not None:
-        state_db = data_dir / "User" / "globalStorage" / "state.vscdb"
-    if state_db is None:
-        return None
-
-    shared_db = settings.shared_db or _shared_state_db_for("code")
-    if not state_db.is_file():
-        if data_dir is not None and shared_db is not None:
-            # The shared database alone can still be usable; keep going rather
-            # than reporting nothing at all.
-            log.warning("no state database at %s; using the shared one only", state_db)
-            state_db = None
-        else:
-            # A typo here would otherwise quietly empty the menu.
-            log.warning("configured state database does not exist: %s", state_db)
-            return None
-
-    desktop = settings.desktop or _find_desktop_file(DESKTOP_CANDIDATES["code"])
-    if desktop is None:
-        log.warning("no VS Code desktop file found for %s", state_db or shared_db)
-        return None
-    return Installation(
-        variant="code",
-        executable=settings.exec_path or shutil.which("code") or "code",
-        desktop_path=desktop,
-        state_db=state_db,
-        shared_state_db=shared_db,
-    )
-
-
 def discover_installations() -> list[Installation]:
     """Detect all usable VS Code installations for the current user.
 
-    A configured ``vscode_dir`` or ``state_db`` that resolves to a usable
-    database means "use this one", so auto-detection is skipped. One that
-    resolves to nothing usable is reported and then ignored, falling back to
-    detection: it is a configuration value, so it must not be able to empty the
-    menu on a machine laid out differently.
+    Every variant with an executable, a desktop file and a state database is
+    reported, along with any Flatpak installation of it. Nothing is configured:
+    what is found is what is read.
     """
-    override = _override_installation()
-    if override is not None:
-        return [override]
-    settings = config.current()
-    if settings.vscode_dir is not None or settings.state_db is not None:
-        log.warning("ignoring the configured VS Code path and detecting instead")
-
     found: list[Installation] = []
     for variant, names, _user_data in VARIANTS:
         executable = _find_executable(names)

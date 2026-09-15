@@ -10,12 +10,18 @@ Right-click the VS Code icon in the task manager and pick an entry; it opens in
 VS Code. A per-user systemd service keeps the list in step with VS Code's
 history.
 
-![The Manage Pinned Files dialog: the pinned entries in one pane, the recent
-entries in the other, and the four buttons between them](screenshots/manage_pinned_files.png)
+![The Manage Pinned Files dialog: the recent entries in the left pane, the pinned
+entries in the right, and the four buttons between them](screenshots/manage_pinned_files.png)
 
-The menu's last entry opens that window: pin an entry, drag its order up or
-down, and search either list. The **Settings** button in its footer edits the
-configuration.
+The **Pinned Files: ▹** heading is itself the way into that window — click it to
+pin, unpin and reorder — so there is no separate entry to go hunting for further
+down the menu. Pinned entries carry a hollow star, which is what marks them out
+from the recents at a glance.
+
+The menu holds up to twelve entries in all: the recents newest-first, then the
+pinned entries in the order you arranged them. Workspaces are left out of the
+recents (a `.code-workspace` usually repeats a folder already listed), though a
+pinned one still shows.
 
 ## Install
 
@@ -30,17 +36,25 @@ other command keeps working.
 ## Use
 
 ```bash
-kde-vscode-jumplist recent    # refresh, and list entries with their IDs
+kde-vscode-jumplist recent        # refresh, and list entries with their IDs
+kde-vscode-jumplist recent --uri  # ... also showing each URI
 kde-vscode-jumplist pin <entry-id>
-kde-vscode-jumplist pinned    # list pinned entries
-kde-vscode-jumplist manage    # pin and reorder in a dialog
-kde-vscode-jumplist update    # regenerate the menu
+kde-vscode-jumplist unpin <entry-id>
+kde-vscode-jumplist pinned        # list pinned entries
+kde-vscode-jumplist manage        # pin and reorder in a dialog
+kde-vscode-jumplist update        # regenerate the menu
 ```
 
-Everything else is configured in one file, `~/.config/kde-vscode-jumplist/config.toml`,
-which `install` writes the first time and the dialog's **Settings** button edits.
+`recent` is the one to start with: it prints the IDs that `pin` and `unpin`
+expect. By default its list matches what the menu shows, so kinds the menu
+leaves out can be revealed with `--all`.
+
+Everything else is fixed: the tool keeps its files under
+`~/.config/kde-vscode-jumplist`, writes the generated menu to
+`~/.local/share/applications`, and finds VS Code itself. There is no
+configuration file and nothing to set up.
 
 ## Details
 
-Install layout, the full configuration reference, how it works, both dialogs,
-the Makefile and the test suite: **[DETAILS.md](DETAILS.md)**.
+Install layout, how the menu is built, the dialog's behaviour, the Makefile and
+the test suite: **[DETAILS.md](DETAILS.md)**.

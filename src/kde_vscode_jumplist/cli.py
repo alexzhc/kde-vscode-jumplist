@@ -6,18 +6,10 @@ Commands:
   pin       pin an entry
   unpin     unpin an entry
   pinned    list pinned entries
-  manage    open the pin dialog (also the menu's "Manage Pinned Files…")
+  manage    open the pin dialog (also the menu's "Pinned Files:" heading)
   open      resolve an entry ID and launch it (used by the menu actions)
   install / uninstall  set up or remove the systemd user units
-  install-config  apply this configuration to the one the service reads
   reset     restore the generated desktop entry from the vendor file
-
-The `--config` option names the configuration file, and it is the one thing
-every command needs: the settings live in ``config.toml`` (see
-:mod:`kde_vscode_jumplist.config`), and a missing file is an error rather than
-a run against built-in defaults. Note that ``install`` copies a checkout's file
-to the user's own and then never overwrites it, so an edit made in a checkout
-reaches the service through ``install-config``.
 """
 
 from __future__ import annotations
@@ -32,21 +24,16 @@ import time
 from pathlib import Path
 
 from . import APP_NAME, __version__
-from . import config
 from . import desktop_entry
 from . import manage as manage_panel
+from . import paths
 from .discovery import discover_installations
 from .entry_store import EntryStore
 from .pinned import Pinned
 from .launcher import open_entry
-from .paths import data_dir, user_bin_dir
 from .sync import run_locked_sync
-from .util import atomic_write_text
 
 log = logging.getLogger("kde_vscode_jumplist")
-
-# Same string as the package's APP_NAME, defined once there.
-PROG = APP_NAME
 
 # Narrowest a table column may be squeezed to when fitting the terminal.
 MIN_COLUMN_WIDTH = 24
@@ -57,11 +44,10 @@ DEFAULT_WATCH_INTERVAL = 5.0
 
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 SERVICE_NAME = "kde-vscode-jumplist.service"
-# Unit names from earlier versions. They are removed on install as well as
-# uninstall, so an upgrade cannot leave a second timer running against the same
-# desktop file: "-sync" was dropped when the CLI command was renamed, the
-# project was once kde-vscode-menu, and the timer itself was replaced by the
-# service running `update --watch`.
+# Systemd unit names an older release installed. They are removed on install as
+# well as uninstall, so an upgrade cannot leave a second unit running against the
+# same desktop file: a leftover timer would keep regenerating it, fighting the
+# service.
 LEGACY_UNIT_NAMES = (
     "kde-vscode-jumplist.timer",
     "kde-vscode-jumplist-sync.service",
@@ -75,9 +61,8 @@ LEGACY_UNIT_NAMES = (
 # covers an unexpected exit; a clean stop via `systemctl stop` is not a failure
 # and is not restarted.
 #
-# The configuration file is part of ExecStart rather than a set of Environment=
-# lines, so the service reads exactly the settings `install` read -- including
-# any of them changed afterwards, which the unit then needs no rewriting for.
+# The launcher is baked into ExecStart, so the service starts the CLI the same
+# verified way the menu actions do -- systemd inherits nothing, not even PATH.
 SERVICE_TEMPLATE = """\
 [Unit]
 Description=Keep KDE Plasma jump lists in step with VS Code's recent entries
@@ -100,7 +85,7 @@ def _systemctl(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def _remove_legacy_units() -> list[str]:
-    """Delete units left behind by earlier versions; returns their names."""
+    """Delete units an older release left behind; returns their names."""
     removed: list[str] = []
     for name in LEGACY_UNIT_NAMES:
         path = SYSTEMD_USER_DIR / name
@@ -123,7 +108,7 @@ def install_executable() -> Path | None:
     built = desktop_entry.packaged_cli_path()
     if built is None:
         return None
-    target = user_bin_dir() / desktop_entry.PROG
+    target = paths.user_bin_dir() / APP_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
     # Skip the copy when the content already matches, but never skip the
     # executable bit: a plain copy would leave a 0644 file that Plasma cannot
@@ -141,7 +126,7 @@ def _remove_installed_executable() -> Path | None:
     A symlink is left alone: that is how pipx exposes the program, and it is
     not ours to delete.
     """
-    target = user_bin_dir() / desktop_entry.PROG
+    target = paths.user_bin_dir() / APP_NAME
     if not target.is_file() or target.is_symlink():
         return None
     target.unlink()
@@ -287,13 +272,10 @@ def cmd_recent(args: argparse.Namespace) -> int:
             row.append(entry.uri)
     _print_table(headers, rows)
     noun = "entry" if len(entries) == 1 else "entries"
-    print(f"\n{len(entries)} {noun} - pin one with: {PROG} pin <entry-id>")
+    print(f"\n{len(entries)} {noun} - pin one with: {APP_NAME} pin <entry-id>")
     if len(stored) > len(entries):
         hidden = ", ".join(sorted(desktop_entry.excluded_kinds()))
-        print(
-            f"({len(stored) - len(entries)} hidden: {hidden} - set exclude_kinds in "
-            f"{config.current().path} to change, or pass --all)"
-        )
+        print(f"({len(stored) - len(entries)} hidden: {hidden} - pass --all to show them)")
     return 0
 
 
@@ -312,7 +294,7 @@ def cmd_open(args: argparse.Namespace) -> int:
 def cmd_pin(args: argparse.Namespace) -> int:
     entry = EntryStore().get(args.entry_id)
     if entry is None:
-        log.error("unknown entry id: %s (run `%s recent` first)", args.entry_id, PROG)
+        log.error("unknown entry id: %s (run `%s recent` first)", args.entry_id, APP_NAME)
         return 2
     Pinned().pin(entry)
     run_locked_sync()
@@ -321,7 +303,7 @@ def cmd_pin(args: argparse.Namespace) -> int:
 
 def cmd_unpin(args: argparse.Namespace) -> int:
     if not Pinned().unpin(args.entry_id):
-        log.error("not pinned: %s (see `%s pinned`)", args.entry_id, PROG)
+        log.error("not pinned: %s (see `%s pinned`)", args.entry_id, APP_NAME)
         return 2
     run_locked_sync()
     return 0
@@ -330,7 +312,7 @@ def cmd_unpin(args: argparse.Namespace) -> int:
 def cmd_pinned(_args: argparse.Namespace) -> int:
     pinned = Pinned().all()
     if not pinned:
-        print(f"no pinned entries yet - add one with: {PROG} pin <entry-id>")
+        print(f"no pinned entries yet - add one with: {APP_NAME} pin <entry-id>")
         return 0
     _print_table(
         ["Entry ID", "Kind", "Label"],
@@ -340,7 +322,7 @@ def cmd_pinned(_args: argparse.Namespace) -> int:
 
 
 def cmd_manage(args: argparse.Namespace) -> int:
-    """Open the pin manager: the menu's "Manage Pinned Files…" action.
+    """Open the pin manager: the menu's "Pinned Files:" heading.
 
     The recents are refreshed first, so the left pane lists what VS Code has
     open now rather than whatever the last timer tick left behind. The menu is
@@ -358,83 +340,10 @@ def cmd_manage(args: argparse.Namespace) -> int:
     return 0
 
 
-def install_configuration() -> Path:
-    """The file the installed service runs against.
-
-    ``install`` sets up a service that outlives the checkout it was installed
-    from, so the unit always names the user's own file: the configuration in
-    use is copied there the first time, and left alone afterwards, so a later
-    ``install`` cannot overwrite settings the service has been running with.
-    From here on this run resolves against that file too.
-
-    There is nothing to invent when no file was found: the settings have no
-    built-in defaults, and `config.current()` has already reported where it
-    looked.
-    """
-    source = config.current()  # raises when there is no configuration to read
-    target = config.installed_path()
-    if source.path != target:
-        if target.is_file():
-            print(f"using the existing configuration at {target}")
-            _note_if_diverged(source.path, target)
-        else:
-            atomic_write_text(target, source.path.read_text(encoding="utf-8"))
-            print(f"wrote {target} from {source.path}")
-        config.use(target)
-    return target
-
-
-def _note_if_diverged(source: Path, target: Path) -> None:
-    """Point out that the file just read is not the one the service uses.
-
-    Two files called config.toml is the one genuinely confusing thing about
-    this setup: editing the checkout's copy changes nothing, because the service
-    reads the user's own, and the next watcher pass overwrites whatever a
-    foreground run wrote. ``install`` is where the two are both in hand, so it
-    is where the difference is worth saying out loud.
-    """
-    try:
-        same = source.read_text(encoding="utf-8") == target.read_text(encoding="utf-8")
-    except OSError:  # unreadable either way; not this note's business
-        return
-    if same:
-        return
-    print(
-        f"note: {source} differs from it, and the service reads {target}\n"
-        f"      run `{PROG} install-config` to apply the settings in {source}"
-    )
-
-
-def cmd_install_config(_args: argparse.Namespace) -> int:
-    """Copy the configuration in use over the installed one.
-
-    Deliberately separate from ``install``: that one never overwrites an
-    installed configuration, so a reinstall cannot discard settings a running
-    service was started with. The cost is that the checkout's config.toml and
-    the user's copy drift apart, with the service reading the second -- so
-    applying an edit made in the checkout is its own command rather than a side
-    effect of installing.
-    """
-    source = config.current()
-    target = config.installed_path()
-    if source.path == target:
-        print(f"already using {target}")
-        return 0
-    atomic_write_text(target, source.path.read_text(encoding="utf-8"))
-    print(f"wrote {target} from {source.path}")
-    # The running watcher re-reads on change, so nothing has to be restarted.
-    print("the service picks it up on its next pass; no restart needed")
-    return 0
-
-
 def cmd_install(args: argparse.Namespace) -> int:
-    # First, so a missing or broken configuration stops the command before it
-    # has touched the unit directory or removed anything.
-    install_configuration()
-
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Drop units from earlier versions first: two timers writing the same
+    # Drop leftover units from an older release first: two units writing the same
     # desktop file would fight each other.
     for name in _remove_legacy_units():
         print(f"removed obsolete unit {name}")
@@ -443,8 +352,8 @@ def cmd_install(args: argparse.Namespace) -> int:
     if installed is not None:
         launcher = [str(installed)]
         print(f"installed {installed}")
-        if str(user_bin_dir()) not in os.environ.get("PATH", "").split(os.pathsep):
-            print(f"note: {user_bin_dir()} is not on PATH")
+        if str(paths.user_bin_dir()) not in os.environ.get("PATH", "").split(os.pathsep):
+            print(f"note: {paths.user_bin_dir()} is not on PATH")
     else:
         # No built executable (e.g. a pipx install): reuse whatever verified
         # launcher the desktop entries use, so the service keeps tracking it.
@@ -454,11 +363,10 @@ def cmd_install(args: argparse.Namespace) -> int:
             desktop_entry.format_exec(launcher),
         )
 
-    # The unit names the configuration file, so it reads the settings this run
-    # read however it is started -- systemd exports nothing either.
-    exec_start = desktop_entry.format_exec(
-        [*launcher, *desktop_entry.config_arguments(), "update", "--watch"]
-    )
+    # The unit runs the same launcher this run resolved; systemd exports
+    # nothing, so the watcher has to be started the way the menu actions start
+    # the CLI, without a shell environment to inherit.
+    exec_start = desktop_entry.format_exec([*launcher, "update", "--watch"])
     (SYSTEMD_USER_DIR / SERVICE_NAME).write_text(
         SERVICE_TEMPLATE.format(exec_start=exec_start), encoding="utf-8"
     )
@@ -476,8 +384,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             return result.returncode
     print(
         f"installed {SERVICE_NAME} (watching every {_seconds_text(DEFAULT_WATCH_INTERVAL)})\n"
-        f"configuration:  {config.current().path}\n"
-        f"data directory: {data_dir()}\n"
+        f"data directory: {paths.data_dir()}\n"
         f"menu file:      {desktop_entry.paths.user_applications_dir()}\n"
         f"follow it with: systemctl --user status {SERVICE_NAME}"
     )
@@ -503,7 +410,7 @@ def cmd_reset(_args: argparse.Namespace) -> int:
 
     Our menu file is the vendor entry with ``Actions=`` groups appended, so a
     generated file that has drifted -- hand-edited, truncated, or left behind
-    by an older version -- can be rebuilt rather than diagnosed. The generated
+    by a failed write -- can be rebuilt rather than diagnosed. The generated
     copies are deleted and written again from the vendor text.
 
     Nothing else is touched. In particular no sync is run: the pinned entries,
@@ -564,48 +471,21 @@ def _entry_id_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("entry_id", help="entry ID (see `recent` / `pinned`)")
 
 
-def _config_option(parser: argparse.ArgumentParser) -> None:
-    """Add ``--config``; the same option, on the main parser and subcommands.
-
-    Everything that starts this CLI without an inherited environment writes the
-    option *before* the subcommand (the generated menu actions and the systemd
-    unit), while a person typing it by hand tends to put it last, so both are
-    accepted. ``SUPPRESS`` is what makes that work: without it the subcommand's
-    default would overwrite the value given before it.
-    """
-    parser.add_argument(
-        "--config",
-        metavar="PATH",
-        default=argparse.SUPPRESS,
-        help=(
-            "configuration file to use (default: ./config.toml, then "
-            f"{config.installed_path()})"
-        ),
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
-    # Shared with every subcommand so --config is accepted on either side of it;
-    # add_help stays with the owning parser so there is one -h per command.
-    common = argparse.ArgumentParser(add_help=False)
-    _config_option(common)
-
-    parser = argparse.ArgumentParser(prog=PROG, description=__doc__, parents=[common])
+    parser = argparse.ArgumentParser(prog=APP_NAME, description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
     recent = sub.add_parser(
-        "recent", parents=[common], help="refresh from VS Code and list recent entries"
+        "recent", help="refresh from VS Code and list recent entries"
     )
     recent.add_argument("--uri", action="store_true", help="also show each entry's URI")
     recent.add_argument(
         "--all", action="store_true", help="also list kinds the menu excludes (workspaces)"
     )
     recent.set_defaults(func=cmd_recent)
-    update = sub.add_parser(
-        "update", parents=[common], help="regenerate the icon context menu"
-    )
+    update = sub.add_parser("update", help="regenerate the icon context menu")
     update.add_argument(
         "--watch",
         nargs="?",
@@ -620,55 +500,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update.set_defaults(func=cmd_update)
 
-    pin = sub.add_parser("pin", parents=[common], help="pin an entry")
+    pin = sub.add_parser("pin", help="pin an entry")
     _entry_id_arg(pin)
     pin.set_defaults(func=cmd_pin)
 
-    unpin = sub.add_parser("unpin", parents=[common], help="unpin an entry")
+    unpin = sub.add_parser("unpin", help="unpin an entry")
     _entry_id_arg(unpin)
     unpin.set_defaults(func=cmd_unpin)
 
-    sub.add_parser(
-        "pinned", parents=[common], help="list pinned entries"
-    ).set_defaults(func=cmd_pinned)
+    sub.add_parser("pinned", help="list pinned entries").set_defaults(func=cmd_pinned)
 
     sub.add_parser(
-        "manage", parents=[common], help="pin and reorder pinned entries in a dialog"
+        "manage", help="pin and reorder pinned entries in a dialog"
     ).set_defaults(func=cmd_manage)
 
     # Internal: the generated menu actions invoke this to launch an entry.
-    open_cmd = sub.add_parser(
-        "open", parents=[common], help="open an entry by ID in VS Code"
-    )
+    open_cmd = sub.add_parser("open", help="open an entry by ID in VS Code")
     _entry_id_arg(open_cmd)
     open_cmd.set_defaults(func=cmd_open)
 
     install = sub.add_parser(
         "install",
-        parents=[common],
         help=(
-            f"install the executable to {user_bin_dir()} and a {SERVICE_NAME} "
+            f"install the executable to {paths.user_bin_dir()} and a {SERVICE_NAME} "
             f"watching the menu to {SYSTEMD_USER_DIR}"
         ),
     )
     install.set_defaults(func=cmd_install)
 
     sub.add_parser(
-        "install-config",
-        parents=[common],
-        help=(
-            "copy the configuration in use over the installed one, which is what "
-            "the service reads"
-        ),
-    ).set_defaults(func=cmd_install_config)
-
-    sub.add_parser(
-        "uninstall", parents=[common], help="remove the systemd user units"
+        "uninstall", help="remove the systemd user units"
     ).set_defaults(func=cmd_uninstall)
 
     sub.add_parser(
         "reset",
-        parents=[common],
         help="restore the generated desktop entry from the vendor file",
     ).set_defaults(func=cmd_reset)
 
@@ -682,16 +547,12 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    # Set before dispatch: every command but `uninstall` reads a setting, and
-    # `install` needs to know which file to seed the user's own copy from.
-    config.use(getattr(args, "config", None))
+    # Somewhere to keep pinned.json, entries.json and the lock, made here so a
+    # first run does not need a write to happen before it has a home. Skipped
+    # for --help/--version, which argparse exits on above.
+    paths.ensure_data_dir()
     try:
         return int(args.func(args) or 0)
-    except config.ConfigError as error:
-        # A configuration problem is the user's to fix, so it is reported as a
-        # message naming the file rather than as a traceback.
-        print(f"{PROG}: {error}", file=sys.stderr)
-        return 2
     except Exception:  # noqa: BLE001 - top-level guard for a user daemon
         log.exception("unhandled error")
         return 1

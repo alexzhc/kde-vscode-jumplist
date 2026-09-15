@@ -1,18 +1,10 @@
 PY ?= python3
 
-# Every setting -- where the tool keeps its own files, which VS Code data is
-# read, how the menu is laid out -- lives in one TOML file, so there is nothing
-# to export here. ./config.toml is the checkout's copy; it documents every
-# setting and its default, and `install` writes that same file to
-# ~/.config/kde-vscode-jumplist if it is not there yet.
-#
-# Aim a single run at another file with `make update CONFIG=/tmp/other.toml`.
-CONFIG ?= $(CURDIR)/config.toml
+# Where the tool keeps its own files is fixed (the XDG directories), so there is
+# nothing to configure here.
 
-# Run the CLI from this checkout (pytest finds src/ via pyproject.toml). The
-# configuration file is named outright, so a target does not depend on the
-# working directory it happens to be run from.
-CLI := PYTHONPATH=$(CURDIR)/src $(PY) -m kde_vscode_jumplist --config $(CONFIG)
+# Run the CLI from this checkout (pytest finds src/ via pyproject.toml).
+CLI := PYTHONPATH=$(CURDIR)/src $(PY) -m kde_vscode_jumplist
 
 # The unit written by `install`: one long-running service that watches VS Code's
 # history and keeps the menu in step. It has an [Install] section, so
@@ -22,7 +14,7 @@ SYSTEMCTL ?= systemctl --user
 APP := kde-vscode-jumplist
 SERVICE := $(APP).service
 
-.PHONY: help build recent r update watch pin unpin pinned f manage test install install-config uninstall reset enable disable
+.PHONY: help build recent r update watch pin unpin pinned f manage test install uninstall reset enable disable
 
 help:
 	@echo "kde-vscode-jumplist"
@@ -37,15 +29,12 @@ help:
 	@echo "  make manage          pin and reorder pinned entries in a dialog"
 	@echo "  make test            run the test suite"
 	@echo "  make install         install the executable + systemd user service"
-	@echo "  make install-config  apply this config.toml to the copy the service reads"
 	@echo "  make enable          enable --now the service (start watching)"
 	@echo "  make disable         disable --now the service (stop watching)"
 	@echo "  make uninstall       remove the executable and the systemd user service"
 	@echo "  make reset           rebuild the generated code.desktop from the vendor"
 	@echo "                       file (saved pinned entries are left alone)"
 	@echo ""
-	@echo "  CONFIG               configuration file to use, default config.toml in"
-	@echo "                       this checkout, e.g. make update CONFIG=/tmp/x.toml"
 	@echo "  WATCH                seconds between 'watch' passes, default 5, e.g."
 	@echo "                       make watch WATCH=2"
 	@echo "  ARGS                 extra flags for 'recent', e.g."
@@ -85,17 +74,12 @@ manage:
 test:
 	@$(PY) -m pytest
 
-# `install` seeds ~/.config/kde-vscode-jumplist/config.toml from $(CONFIG) when
-# it does not exist yet, and points the unit at the user's own copy, so the
-# service keeps working if this checkout later moves. It will not overwrite an
-# existing one, so an edit made here afterwards is applied with `install-config`
-# -- otherwise this file's settings are not the ones in effect, and the menu
-# keeps being regenerated from the other.
+# `install` copies the executable into ~/.local/bin and writes the systemd user
+# service, which then runs the same verified launcher the menu actions use.
+# Where the tool keeps its own files is fixed, so there is nothing to seed or
+# apply afterwards.
 install: build
 	@$(CLI) install
-
-install-config:
-	@$(CLI) install-config
 
 enable:
 	@$(SYSTEMCTL) enable --now $(SERVICE)

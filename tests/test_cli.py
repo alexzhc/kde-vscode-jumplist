@@ -6,17 +6,14 @@ import builtins
 import configparser
 import json
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from conftest import CURRENT_SCHEMA_PAYLOAD, VENDOR_DESKTOP, parse_raw, settings_text
+from conftest import CURRENT_SCHEMA_PAYLOAD, VENDOR_DESKTOP, parse_raw
 
-from kde_vscode_jumplist import cli, config
+from kde_vscode_jumplist import cli
 from kde_vscode_jumplist.paths import entries_path, pinned_path, user_bin_dir
-
-WriteConfig = Callable[..., Path]
 
 
 def _write_entries(entries: list[dict]) -> None:
@@ -156,6 +153,25 @@ def test_empty_listings_are_friendly(
     assert "no pinned entries yet" in capsys.readouterr().out
 
 
+def test_the_cli_makes_its_data_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A first run creates ~/.config/kde-vscode-jumplist; nothing else has to.
+
+    `pinned` on a fresh machine only reads, and would find nothing to read --
+    so the directory being there afterwards is the command's own doing.
+    """
+    config_home = tmp_path / "fresh-config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    data = config_home / "kde-vscode-jumplist"
+    assert not config_home.exists()
+
+    assert cli.main(["pinned"]) == 0
+    assert data.is_dir()
+    assert list(data.iterdir()) == []  # created, with nothing invented in it
+    capsys.readouterr()
+
+
 # --- systemd user units --------------------------------------------------
 
 
@@ -206,8 +222,8 @@ def _exec_start(path: Path) -> str:
 
 
 def _expected_exec_start(launcher: str) -> str:
-    """What `install` writes: launcher, the config file, then the watcher."""
-    return f"{launcher} --config {config.installed_path()} update --watch"
+    """What `install` writes: the verified launcher, then the watcher."""
+    return f"{launcher} update --watch"
 
 
 def _parse_unit(path: Path) -> configparser.RawConfigParser:
@@ -235,9 +251,9 @@ def test_install_writes_one_long_running_service(
     parser = _parse_unit(service)
     # simple, not oneshot: it stays up and watches rather than running once.
     assert parser.get("Service", "Type") == "simple"
-    # The configuration file travels as an argument. systemd exports nothing,
-    # so a unit that relied on the environment would read the built-in defaults
-    # instead -- and quietly disagree with the shell that installed it.
+    # The verified launcher is baked into ExecStart. systemd exports nothing,
+    # not even PATH, so a bare command name would not be found -- and the
+    # watcher has to start the same way the menu actions start the CLI.
     assert parser.get("Service", "ExecStart") == _expected_exec_start(
         "/usr/bin/kde-vscode-jumplist"
     )
@@ -257,151 +273,6 @@ def test_install_writes_one_long_running_service(
         ["systemctl", "--user", "enable", cli.SERVICE_NAME],
         ["systemctl", "--user", "restart", cli.SERVICE_NAME],
     ]
-
-
-def test_install_seeds_the_users_configuration(
-    systemd_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """With nothing at ~/.config, install copies the one it was run against."""
-    _fake_systemctl(monkeypatch)
-    # Which launcher gets installed is another test's business.
-    monkeypatch.setattr(cli.desktop_entry, "packaged_cli_path", lambda: None)
-    # The checkout's own file, somewhere else entirely, so that the copy into
-    # the user's directory is observable.
-    source = config.installed_path().parent.parent / "checkout" / "config.toml"
-    source.parent.mkdir(parents=True)
-    source.write_text(settings_text(max_recents=7), encoding="utf-8")
-    config.installed_path().unlink()
-    config.forget()
-
-    assert cli.main(["install", "--config", str(source)]) == 0
-
-    installed = config.installed_path()
-    assert installed.is_file()
-    assert installed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
-    assert f"wrote {installed} from {source}" in capsys.readouterr().out
-    # A click and the service both read the user's own copy from now on.
-    assert config.current().path == installed
-    assert config.current().max_recents == 7
-    assert _exec_start(systemd_dir / cli.SERVICE_NAME) == _expected_exec_start(
-        "/usr/bin/kde-vscode-jumplist"
-    )
-
-
-def test_install_leaves_an_existing_configuration_alone(
-    systemd_dir: Path, monkeypatch: pytest.MonkeyPatch, write_config: WriteConfig
-) -> None:
-    """Re-installing must not overwrite settings the service runs with."""
-    _fake_systemctl(monkeypatch)
-    monkeypatch.setattr(cli, "install_executable", lambda: None)
-    path = write_config(max_recents=42)
-    before = path.read_text(encoding="utf-8")
-
-    assert cli.main(["install"]) == 0
-
-    assert path.read_text(encoding="utf-8") == before
-    assert config.current().max_recents == 42
-
-
-def test_install_points_out_a_divergent_configuration(
-    systemd_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Two files called config.toml: say which one the service reads.
-
-    The settings in a checkout's file are not the ones in effect once the
-    service is installed, and its next pass overwrites whatever a foreground
-    run wrote -- which looks exactly like a setting being ignored.
-    """
-    _fake_systemctl(monkeypatch)
-    monkeypatch.setattr(cli, "install_executable", lambda: None)
-    installed = config.installed_path()
-    installed.parent.mkdir(parents=True, exist_ok=True)
-    installed.write_text(settings_text(max_recents=10), encoding="utf-8")
-    checkout = installed.parent.parent / "checkout" / "config.toml"
-    checkout.parent.mkdir(parents=True)
-    checkout.write_text(settings_text(max_recents=20), encoding="utf-8")
-
-    assert cli.main(["install", "--config", str(checkout)]) == 0
-
-    out = capsys.readouterr().out
-    assert "using the existing configuration" in out
-    assert f"{checkout} differs from it" in out
-    assert "install-config" in out
-    # The installed file is still the one that counts.
-    assert config.current().max_recents == 10
-
-
-def test_install_config_applies_the_file_in_use(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The documented way to make a checkout's edit reach the service."""
-    installed = config.installed_path()
-    installed.parent.mkdir(parents=True, exist_ok=True)
-    installed.write_text(settings_text(max_recents=10), encoding="utf-8")
-    checkout = tmp_path / "checkout" / "config.toml"
-    checkout.parent.mkdir(parents=True)
-    checkout.write_text(settings_text(max_recents=20), encoding="utf-8")
-
-    assert cli.main(["install-config", "--config", str(checkout)]) == 0
-
-    assert installed.read_text(encoding="utf-8") == checkout.read_text(encoding="utf-8")
-    assert "wrote" in capsys.readouterr().out
-    # And the settings the service would now resolve are the new ones.
-    config.use(None)
-    assert config.current().max_recents == 20
-
-
-def test_install_config_is_a_no_op_when_already_installed(
-    write_config: WriteConfig, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Running it from the installed file itself changes nothing."""
-    path = write_config(max_recents=7)
-
-    assert cli.main(["install-config"]) == 0
-
-    assert "already using" in capsys.readouterr().out
-    assert path.read_text(encoding="utf-8") == settings_text(max_recents=7)
-
-
-def test_install_requires_a_configuration(
-    systemd_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Nothing to read is an error, not a run against invented settings.
-
-    There are no built-in defaults, so installing without a configuration would
-    have to guess where the service's files belong -- including inside the
-    user's home. The command stops before touching systemd, and says where it
-    looked.
-    """
-    calls = _fake_systemctl(monkeypatch)
-    config.installed_path().unlink()
-    config.forget()
-
-    assert cli.main(["install"]) == 2
-
-    captured = capsys.readouterr()
-    assert f"no {config.CONFIG_FILE_NAME} found" in captured.err
-    assert "--config" in captured.err
-    assert calls == []
-    assert not (systemd_dir / cli.SERVICE_NAME).exists()
-
-
-def test_install_names_the_configuration_not_the_settings(
-    systemd_dir: Path, write_config: WriteConfig
-) -> None:
-    """The unit points at the file, so later edits need no reinstalling."""
-    write_config(max_recents=20, exclude_kinds=["folder", "workspace"])
-
-    assert cli.main(["install"]) == 0
-    unit = (systemd_dir / cli.SERVICE_NAME).read_text(encoding="utf-8")
-
-    assert "--config " in unit
-    assert "max_recents" not in unit  # the settings stay in the file
-    assert _unit_environment(systemd_dir / cli.SERVICE_NAME) == {}
 
 
 def test_install_removes_obsolete_units(
@@ -485,7 +356,7 @@ def test_install_migrates_the_timer_it_replaced(
 
     assert not old_timer.exists()
     assert ["systemctl", "--user", "disable", "--now", old_timer.name] in calls
-    assert "--config " in _exec_start(systemd_dir / cli.SERVICE_NAME)
+    assert "update --watch" in _exec_start(systemd_dir / cli.SERVICE_NAME)
 
 
 def test_uninstall_removes_every_known_unit(

@@ -5,50 +5,61 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from conftest import VENDOR_DESKTOP, parse_raw
 
-from kde_vscode_jumplist import config
 from kde_vscode_jumplist.desktop_entry import (
     ACTION_PREFIX,
     DEFAULT_ICON,
     PINNED_ICON,
     PINNED_CAPTION_ACTION_ID,
+    PINNED_CAPTION_BASE,
     PINNED_CAPTION_ICON,
-    PINNED_CAPTION_TEXT,
-    MANAGE_ACTION_ID,
-    MANAGE_ICON,
-    MANAGE_TEXT,
+    PINNED_CAPTION_MARKER,
+    PINNED_CAPTION_PAD_FREE,
+    PINNED_CAPTION_PAD_RATIO,
     NOOP_EXEC,
     RECENT_CAPTION_ACTION_ID,
     RECENT_CAPTION_ICON,
     RECENT_CAPTION_TEXT,
+    TOTAL_ENTRIES,
     build_desktop_content,
-    config_arguments,
     desktop_launcher_command,
     excluded_kinds,
-    pinned_position,
+    pinned_caption_text,
     format_exec,
     keep_recent,
-    resolve_cli_command,
 )
 from kde_vscode_jumplist.models import ENTRY_FILE, ENTRY_FOLDER, ENTRY_WORKSPACE, MenuEntry
-
-WriteConfig = Callable[..., Path]
 
 
 # Shared parser from conftest: same pitfalls as the unit files.
 _parse = parse_raw
 
 
-# Both inert section headings; they are never per-entry actions.
+def _expected_heading(pinned: list[MenuEntry], recents: list[MenuEntry]) -> str:
+    """The heading the generator will write for these entries.
+
+    Its padding is sized off the longest label that gets listed, so it cannot be
+    a module constant; this mirrors the same arithmetic to compare against.
+    """
+    listed_pinned = pinned[:TOTAL_ENTRIES]
+    listed_recents = keep_recent(recents)[: max(0, TOTAL_ENTRIES - len(listed_pinned))]
+    longest = max((len(e.label) for e in (*listed_pinned, *listed_recents)), default=0)
+    return pinned_caption_text(longest)
+
+
+# The two section headings. Neither is a per-entry action, so they are filtered
+# out wherever the entry actions themselves are being counted.
 CAPTION_IDS = (PINNED_CAPTION_ACTION_ID, RECENT_CAPTION_ACTION_ID)
-# Generated actions that are not a recent/pinned entry: the two headings and
-# the manager. Filters Actions= down to the entries themselves.
-NON_ENTRY_IDS = (*CAPTION_IDS, MANAGE_ACTION_ID)
+NON_ENTRY_IDS = CAPTION_IDS
+
+# The action id an earlier version wrote for its dedicated "Manage Pinned
+# Files…" entry. It is no longer generated, but files carrying it still have to
+# be cleaned up, so it is named here rather than imported.
+LEGACY_MANAGE_ACTION_ID = ACTION_PREFIX + "Manage"
 
 
 def _entries() -> tuple[list[MenuEntry], list[MenuEntry]]:
@@ -74,7 +85,7 @@ def test_generated_actions_structure() -> None:
     actions = parser.get("Desktop Entry", "Actions").split(";")
     actions = [a for a in actions if a]
 
-    # Vendor action preserved, ours appended, and the manager closes the list.
+    # Vendor action preserved, ours appended after it.
     assert actions[0] == "new-empty-window"
     generated = [
         a for a in actions if a.startswith(ACTION_PREFIX) and a not in NON_ENTRY_IDS
@@ -83,9 +94,9 @@ def test_generated_actions_structure() -> None:
     workspace = next(e for e in recents if e.kind == ENTRY_WORKSPACE)
     assert f"KdeVsCodeJumpList-Recent-{workspace.entry_id}" not in actions
 
-    # Pinned first.
+    # Pinned last: the pinned block is listed after the recents (PINNED_BELOW).
     pinned = [a for a in generated if "Pinned" in a]
-    assert len(pinned) == 1 and generated[0] == pinned[0]
+    assert len(pinned) == 1 and generated[-1] == pinned[0]
 
     for action in generated:
         # KService only recognizes "[Desktop Action <id>]" groups and skips
@@ -98,10 +109,10 @@ def test_generated_actions_structure() -> None:
     for action in generated:
         section = f"Desktop Action {action}"
         assert parser.get(section, "Exec").endswith(f"open {action.rsplit('-', 1)[-1]}")
-    # The blocks are closed by a separator, and the manager sits below it -- the
-    # position where Plasma's own task-manager entries follow.
-    assert actions[-2] == "_SEPARATOR_"
-    assert actions[-1] == MANAGE_ACTION_ID
+    # The list ends with a separator, so Plasma's own task-manager entries
+    # follow a line rather than butting up against our last entry.
+    assert actions[-1] == "_SEPARATOR_"
+    assert actions[-2] == pinned[0]
 
 
 def test_exec_uses_entry_ids_not_uris() -> None:
@@ -150,19 +161,21 @@ def test_regeneration_removes_stale_actions() -> None:
             assert section == f"Desktop Action {generated[0]}"
 
 
-def test_manage_action_is_rewritten_from_older_files() -> None:
-    """An older menu's Manage action is replaced in place, not duplicated.
+def test_an_older_files_manage_action_is_dropped() -> None:
+    """The separate Manage entry is gone, replaced by the pinned heading.
 
-    The id is the same one an earlier version wrote, so regeneration must
-    update its caption and launcher rather than appending a second copy.
+    A menu an earlier version generated still names it in Actions= and defines
+    its group, so regeneration has to take both away rather than leave two ways
+    into the dialog.
     """
     from kde_vscode_jumplist.desktop_entry import GENERATED_MARKER
 
     old = GENERATED_MARKER + "\n" + VENDOR_DESKTOP.replace(
-        "Actions=new-empty-window;", f"Actions=new-empty-window;{MANAGE_ACTION_ID};"
+        "Actions=new-empty-window;",
+        f"Actions=new-empty-window;{LEGACY_MANAGE_ACTION_ID};",
     ) + (
-        f"\n[Desktop Action {MANAGE_ACTION_ID}]\n"
-        "Name=Manage VS Code Pinned…\nIcon=bookmark-new\n"
+        f"\n[Desktop Action {LEGACY_MANAGE_ACTION_ID}]\n"
+        "Name=Manage Pinned Files…\nIcon=bookmark-new\n"
         "Exec=/usr/bin/python3 -m kde_vscode_jumplist manage\n"
     )
 
@@ -170,13 +183,13 @@ def test_manage_action_is_rewritten_from_older_files() -> None:
     content = build_desktop_content(old, [], recents)
     parser = _parse(content)
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-    section = f"Desktop Action {MANAGE_ACTION_ID}"
 
-    assert actions.count(MANAGE_ACTION_ID) == 1
-    assert parser.get(section, "Name") == MANAGE_TEXT
-    assert parser.get(section, "Exec").endswith(" manage")
-    # The stale hard-coded interpreter is gone, replaced by the verified 
-    # launcher the other actions use.
+    assert LEGACY_MANAGE_ACTION_ID not in actions
+    assert not parser.has_section(f"Desktop Action {LEGACY_MANAGE_ACTION_ID}")
+    # The way in is the pinned heading now, and it carries the verified launcher
+    # the other actions use rather than a stale hard-coded interpreter.
+    heading = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
+    assert parser.get(heading, "Exec") == f"{desktop_launcher_command()} manage"
     assert "/usr/bin/python3 -m" not in content
 
 
@@ -238,10 +251,9 @@ def test_pre_rename_actions_are_replaced(tmp_path: Path) -> None:
     assert not any(a.startswith("KdeVsCodeMenu") for a in actions)
     assert not any(s.startswith("Desktop Action KdeVsCodeMenu") for s in parser.sections())
     assert content.startswith("# Generated by kde-vscode-jumplist")
-    # The pre-rename Manage group is dropped, and only the current one remains.
-    assert [s for s in parser.sections() if "Manage" in s] == [
-        f"Desktop Action {MANAGE_ACTION_ID}"
-    ]
+    # Neither the pre-rename Manage group nor any current one remains: there is
+    # no dedicated manager entry at all any more.
+    assert not [s for s in parser.sections() if "Manage" in s]
     assert "new-empty-window" in actions
 
 
@@ -269,7 +281,7 @@ def test_pinned_entries_get_the_star_icon() -> None:
         if not action.startswith("KdeVsCodeJumpList-Pinned"):
             continue
         section = f"Desktop Action {action}"
-        assert parser.get(section, "Icon") == PINNED_ICON == "starred"
+        assert parser.get(section, "Icon") == PINNED_ICON == "non-starred"
         assert not parser.get(section, "Name").endswith(" [pinned]")
 
     # Recents keep their per-kind icons, so the star reads as "pinned".
@@ -315,55 +327,74 @@ def _recent_sections(content: str) -> list[str]:
     return [s for s in parser.sections() if s.startswith("Desktop Action KdeVsCodeJumpList-Recent")]
 
 
-def test_max_recents_default_is_10() -> None:
+def test_total_entries_is_12() -> None:
     content = build_desktop_content(VENDOR_DESKTOP, [], _many_entries(25))
-    assert len(_recent_sections(content)) == 10
+    assert len(_recent_sections(content)) == 12
 
 
-def test_max_recents_caps_combined_not_per_kind() -> None:
-    """Folders/workspaces/files share one budget, taken in MRU order."""
+def test_recents_share_one_budget_across_kinds() -> None:
+    """Folders and files share one budget, taken in MRU order."""
     recents = _many_entries(25)
     content = build_desktop_content(VENDOR_DESKTOP, [], recents)
     parser = _parse(content)
 
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
     recent_ids = [a for a in actions if a.startswith("KdeVsCodeJumpList-Recent")]
-    assert len(recent_ids) == 10
+    assert len(recent_ids) == 12
 
-    # The first 10 MRU entries are kept, in order, regardless of kind.
-    kept = {e.entry_id for e in recents[:10]}
-    assert {a.rsplit("-", 1)[-1] for a in recent_ids} == kept
-    assert [a.rsplit("-", 1)[-1] for a in recent_ids] == [e.entry_id for e in recents[:10]]
+    # The first 12 MRU entries are kept, in order, regardless of kind.
+    assert [a.rsplit("-", 1)[-1] for a in recent_ids] == [e.entry_id for e in recents[:12]]
 
     # Both kinds are represented in the combined list.
     icons = {parser.get(f"Desktop Action {a}", "Icon") for a in recent_ids}
     assert "folder" in icons and "text-x-generic" in icons
 
 
-def test_max_recents_setting(write_config: WriteConfig) -> None:
-    write_config(max_recents=3)
+def test_the_budget_is_shared_with_the_pinned_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned entries take their share of the budget first, recents get the rest."""
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.TOTAL_ENTRIES", 5)
+    pinned = _many_entries(3)
+    content = build_desktop_content(VENDOR_DESKTOP, pinned, _many_entries(25))
+    actions = [a for a in _parse(content).get("Desktop Entry", "Actions").split(";") if a]
+
+    assert len([a for a in actions if a.startswith("KdeVsCodeJumpList-Pinned")]) == 3
+    assert len([a for a in actions if a.startswith("KdeVsCodeJumpList-Recent")]) == 2
+
+
+def test_pinned_entries_alone_can_fill_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """More pins than the budget leaves no room for recents at all."""
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.TOTAL_ENTRIES", 2)
+    content = build_desktop_content(VENDOR_DESKTOP, _many_entries(3), _many_entries(25))
+    actions = [a for a in _parse(content).get("Desktop Entry", "Actions").split(";") if a]
+
+    assert not _recent_sections(content)
+    assert len([a for a in actions if a.startswith("KdeVsCodeJumpList-Pinned")]) == 2
+
+
+def test_total_entries_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.TOTAL_ENTRIES", 3)
     content = build_desktop_content(VENDOR_DESKTOP, [], _many_entries(25))
     assert len(_recent_sections(content)) == 3
 
 
-def test_max_recents_zero_hides_recents(write_config: WriteConfig) -> None:
-    write_config(max_recents=0)
+def test_a_zero_budget_lists_no_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pinned block is capped by the same budget, so 0 lists no entries.
+
+    The pinned heading survives even then, because it is the way into the
+    dialog and the menu would otherwise have no way back in.
+    """
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.TOTAL_ENTRIES", 0)
     pinned = [MenuEntry(ENTRY_FOLDER, "file:///pinned", "pinned", "code")]
     content = build_desktop_content(VENDOR_DESKTOP, pinned, _many_entries(5))
-    parser = _parse(content)
-    assert not _recent_sections(content)
-    actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-    # The whole recents block is gone, caption and separators included; the
-    # pinned block keeps its own pair plus the closing separator.
+    actions = [a for a in _parse(content).get("Desktop Entry", "Actions").split(";") if a]
+
     assert actions == [
         "new-empty-window",
         "_SEPARATOR_",
         PINNED_CAPTION_ACTION_ID,
-        f"KdeVsCodeJumpList-Pinned-{pinned[0].entry_id}",
         "_SEPARATOR_",
-        MANAGE_ACTION_ID,
     ]
-    assert not parser.has_section(f"Desktop Action {RECENT_CAPTION_ACTION_ID}")
+    assert not _recent_sections(content)
 
 
 # --- excluded kinds -------------------------------------------------------
@@ -385,13 +416,17 @@ def test_workspaces_excluded_from_recents_by_default() -> None:
 
 
 def test_workspace_only_recents_leave_no_empty_block() -> None:
-    """Excluding every recent must not leave a bare caption and separators."""
+    """Excluding every recent must not leave a bare recents caption behind."""
     workspace = MenuEntry(ENTRY_WORKSPACE, "file:///w.code-workspace", "w", "code")
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, [], [workspace]))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
 
-    # Nothing to list, so no separator either -- but the manager is always there.
-    assert actions == ["new-empty-window", MANAGE_ACTION_ID]
+    assert actions == [
+        "new-empty-window",
+        "_SEPARATOR_",
+        PINNED_CAPTION_ACTION_ID,
+        "_SEPARATOR_",
+    ]
     assert not parser.has_section(f"Desktop Action {RECENT_CAPTION_ACTION_ID}")
 
 
@@ -412,8 +447,11 @@ def test_pinned_workspace_is_still_listed() -> None:
     assert not parser.has_section(f"Desktop Action {RECENT_CAPTION_ACTION_ID}")
 
 
-def test_exclude_kinds_setting_can_exclude_more(write_config: WriteConfig) -> None:
-    write_config(exclude_kinds=["workspace", "folder"])
+def test_excluding_more_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "kde_vscode_jumplist.desktop_entry.EXCLUDED_KINDS",
+        frozenset({ENTRY_WORKSPACE, ENTRY_FOLDER}),
+    )
     _, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, [], recents))
     icons = {
@@ -424,9 +462,9 @@ def test_exclude_kinds_setting_can_exclude_more(write_config: WriteConfig) -> No
     assert icons == {"text-x-generic"}  # only the two files survive
 
 
-def test_exclude_kinds_empty_lists_every_kind(write_config: WriteConfig) -> None:
-    """An empty list opts back in to the excluded kind."""
-    write_config(exclude_kinds=[])
+def test_excluding_nothing_lists_every_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty set opts back in to the excluded kind."""
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.EXCLUDED_KINDS", frozenset())
     assert excluded_kinds() == frozenset()
 
     _, recents = _entries()
@@ -444,9 +482,9 @@ def test_exclude_kinds_empty_lists_every_kind(write_config: WriteConfig) -> None
     assert icons == {"folder", DEFAULT_ICON}
 
 
-def test_excluded_kinds_are_not_counted_by_the_limit(write_config: WriteConfig) -> None:
+def test_excluded_kinds_are_not_counted_by_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The limit applies to listed entries, not to filtered-out ones."""
-    write_config(max_recents=3)
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.TOTAL_ENTRIES", 3)
     entries = [
         MenuEntry(ENTRY_WORKSPACE, "file:///w0.code-workspace", "w0", "code"),
         *_many_entries(4),
@@ -469,7 +507,7 @@ def test_keep_recent_preserves_mru_order() -> None:
 
 
 def test_separators_delimit_both_blocks() -> None:
-    """Native "_SEPARATOR_" actions open the pinned and recents blocks."""
+    """Native "_SEPARATOR_" actions open the recents and pinned blocks."""
     pinned, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
@@ -478,23 +516,22 @@ def test_separators_delimit_both_blocks() -> None:
     assert actions == [
         "new-empty-window",
         "_SEPARATOR_",
-        PINNED_CAPTION_ACTION_ID,
-        f"KdeVsCodeJumpList-Pinned-{pinned[0].entry_id}",
-        "_SEPARATOR_",
         RECENT_CAPTION_ACTION_ID,
         *[f"KdeVsCodeJumpList-Recent-{e.entry_id}" for e in listed],
         "_SEPARATOR_",
-        MANAGE_ACTION_ID,
+        PINNED_CAPTION_ACTION_ID,
+        f"KdeVsCodeJumpList-Pinned-{pinned[0].entry_id}",
+        "_SEPARATOR_",
     ]
     # A separator is an Actions= entry only; it must not define a group.
     assert not parser.has_section("Desktop Action _SEPARATOR_")
 
 
-def test_pinned_below_recents_swaps_the_blocks(write_config: WriteConfig) -> None:
-    """pinned_position decides which block comes first."""
+def test_pinned_above_recents_swaps_the_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PINNED_BELOW decides which block comes first."""
+    monkeypatch.setattr("kde_vscode_jumplist.desktop_entry.PINNED_BELOW", False)
     pinned, recents = _entries()
     listed = [e for e in recents if e.kind != ENTRY_WORKSPACE]
-    write_config(pinned_position="below")
 
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
@@ -502,50 +539,30 @@ def test_pinned_below_recents_swaps_the_blocks(write_config: WriteConfig) -> Non
     assert actions == [
         "new-empty-window",
         "_SEPARATOR_",
-        RECENT_CAPTION_ACTION_ID,
-        *[f"KdeVsCodeJumpList-Recent-{e.entry_id}" for e in listed],
-        "_SEPARATOR_",
         PINNED_CAPTION_ACTION_ID,
         f"KdeVsCodeJumpList-Pinned-{pinned[0].entry_id}",
         "_SEPARATOR_",
-        MANAGE_ACTION_ID,
+        RECENT_CAPTION_ACTION_ID,
+        *[f"KdeVsCodeJumpList-Recent-{e.entry_id}" for e in listed],
+        "_SEPARATOR_",
     ]
     # Still closed by exactly one separator, whichever order is used.
     assert actions.count("_SEPARATOR_") == 3
 
 
-def test_pinned_below_with_only_recents(write_config: WriteConfig) -> None:
-    """With nothing pinned, the order setting makes no difference to the menu.
+def test_the_pinned_heading_is_always_there() -> None:
+    """With no recents the pinned heading is the whole menu.
 
-    The two files are not byte-identical: the launcher carries the path of the
-    configuration file, which is what stops a click from reading another one.
-    What must not change is the order the entries are listed in.
+    It is the way into the dialog, so it is not part of a block that can be
+    omitted; only the recents block comes and goes.
     """
     _, recents = _entries()
+    content = build_desktop_content(VENDOR_DESKTOP, [], recents)
 
-    def listed(content: str) -> list[str]:
-        parser = _parse(content)
-        return [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-
-    above = listed(build_desktop_content(VENDOR_DESKTOP, [], recents))
-    write_config(pinned_position="below")
-
-    assert listed(build_desktop_content(VENDOR_DESKTOP, [], recents)) == above
-
-
-def test_pinned_position_value_is_normalized(write_config: WriteConfig) -> None:
-    """Synonyms and capitals are accepted and reduced to "above"/"below".
-
-    Values that make no sense are rejected rather than silently defaulted; the
-    parsing tests in test_config.py cover that.
-    """
-    assert pinned_position() == "above"  # the standard test configuration
-
-    write_config(pinned_position="  TOP ")
-    assert pinned_position() == "above"
-
-    write_config(pinned_position="Bottom")
-    assert pinned_position() == "below"
+    assert set(_captions(content)) == {RECENT_CAPTION_ACTION_ID, PINNED_CAPTION_ACTION_ID}
+    actions = [a for a in _parse(content).get("Desktop Entry", "Actions").split(";") if a]
+    assert actions[-1] == "_SEPARATOR_"
+    assert actions[-2] == PINNED_CAPTION_ACTION_ID
 
 
 def _captions(content: str) -> dict[str, tuple[str, str, str]]:
@@ -565,8 +582,10 @@ def _captions(content: str) -> dict[str, tuple[str, str, str]]:
 def test_captions_head_their_blocks() -> None:
     """Each heading sits directly under the separator opening its block.
 
-    A separator cannot carry text, so a heading is an inert action: it must
-    have real text (Kickoff skips empty-text actions) and a harmless Exec.
+    A separator cannot carry text, so a heading is a real action: it has to
+    have real text (Kickoff skips empty-text actions) and an Exec. The recents
+    heading is inert; the pinned one opens the manager -- see
+    test_the_pinned_heading_opens_the_manager.
     """
     pinned, recents = _entries()
     content = build_desktop_content(VENDOR_DESKTOP, pinned, recents)
@@ -575,17 +594,35 @@ def test_captions_head_their_blocks() -> None:
 
     assert _captions(content) == {
         PINNED_CAPTION_ACTION_ID: (
-            PINNED_CAPTION_TEXT,
+            _expected_heading(pinned, recents),
             PINNED_CAPTION_ICON,
-            NOOP_EXEC,
+            f"{desktop_launcher_command()} manage",
         ),
         RECENT_CAPTION_ACTION_ID: (RECENT_CAPTION_TEXT, RECENT_CAPTION_ICON, NOOP_EXEC),
     }
-    assert PINNED_CAPTION_TEXT == "Pinned Files:"
-    # The two headings are worded consistently (both plural) and use icons that
-    # exist in the usual themes, so neither is mistaken for the other.
+    # The pinned heading says what it does. The marker is pushed to the right
+    # edge by padding the text out, so the heading is the widest item in the
+    # menu and its marker lands where a submenu arrow would -- rather than
+    # sitting in the shortcut column 7px further in.
+    #
+    # This fixture's labels are all shorter than the heading, so there is no
+    # padding to add here; test_heading_padding_appears_only_when_needed
+    # covers the other case.
+    heading = _expected_heading(pinned, recents)
+    assert heading.startswith(PINNED_CAPTION_BASE)
+    assert heading.endswith(PINNED_CAPTION_MARKER)
+    pad = heading[len(PINNED_CAPTION_BASE) : -len(PINNED_CAPTION_MARKER)]
+    assert set(pad) <= {" "}  # only spaces, and possibly none
+    assert heading == heading.rstrip()  # nothing trailing to be trimmed off
+    assert "\t" not in heading  # a tab would go to the shortcut column instead
+    # The recents heading is a plain heading: no marker, no padding. It is
+    # inert, so a chevron there would promise a submenu that does not exist.
     assert RECENT_CAPTION_TEXT == "Recent Files:"
-    assert PINNED_CAPTION_ICON == "bookmarks"
+    assert PINNED_CAPTION_MARKER not in RECENT_CAPTION_TEXT
+    assert "\t" not in RECENT_CAPTION_TEXT
+    # The pinned heading carries the manager's own icon, because that is what
+    # clicking it does.
+    assert PINNED_CAPTION_ICON == "bookmark-new"
     assert RECENT_CAPTION_ICON == "clock"
     assert PINNED_CAPTION_ICON != RECENT_CAPTION_ICON
 
@@ -601,8 +638,8 @@ def test_captions_head_their_blocks() -> None:
     assert actions[recent_index - 1] == "_SEPARATOR_"
     assert actions[recent_index + 1] == f"KdeVsCodeJumpList-Recent-{recents[0].entry_id}"
 
-    # Pinned are listed above the recents.
-    assert pinned_index < recent_index
+    # Pinned are listed below the recents (PINNED_BELOW).
+    assert recent_index < pinned_index
 
     for caption in CAPTION_IDS:
         section = f"Desktop Action {caption}"
@@ -610,66 +647,143 @@ def test_captions_head_their_blocks() -> None:
         assert not parser.has_option(section, "NoDisplay")
         assert not parser.has_option(section, "Type")
 
-    # Only the captions are inert; every other generated action launches.
+    # Only the recents heading is inert; every other generated action launches,
+    # the pinned heading included.
     for name in actions:
-        if name.startswith("KdeVsCodeJumpList-") and name not in CAPTION_IDS:
+        if name.startswith("KdeVsCodeJumpList-") and name != RECENT_CAPTION_ACTION_ID:
             assert parser.get(f"Desktop Action {name}", "Exec") != NOOP_EXEC
 
 
-def test_all_captions_absent_without_entries() -> None:
-    """Empty lists leave no captions and therefore no separators behind."""
+def test_heading_padding_appears_only_when_it_is_needed() -> None:
+    """The pad is sized off the longest label, and only off what it has to make up.
+
+    Padding exists to make the heading the widest item so its marker reaches the
+    right edge. Two ways to get that wrong, both covered here: padding a heading
+    that is already wider than every label does nothing but widen the menu, and
+    charging the heading again for the width its own text already supplies does
+    the same. The second was a real bug -- it added roughly 82px of bare menu.
+    """
+    long_enough = "x" * (PINNED_CAPTION_PAD_FREE + 10)
+    short = "x" * (PINNED_CAPTION_PAD_FREE - 1)
+
+    def heading_for(label: str) -> str:
+        content = build_desktop_content(
+            VENDOR_DESKTOP, [MenuEntry(ENTRY_FOLDER, "file:///p", label, "code")], []
+        )
+        return _parse(content).get(f"Desktop Action {PINNED_CAPTION_ACTION_ID}", "Name")
+
+    def pad_of(heading: str) -> int:
+        return len(heading) - len(PINNED_CAPTION_BASE) - len(PINNED_CAPTION_MARKER)
+
+    # A label shorter than the heading needs no padding: the heading already
+    # wins, so padding it would only widen the menu.
+    assert pad_of(heading_for(short)) == 0
+
+    # A longer one gets padding, and only for the overhang: the base text is
+    # free, so 10 characters of overhang is not charged as the whole label.
+    expected = round(10 * PINNED_CAPTION_PAD_RATIO)
+    assert pad_of(heading_for(long_enough)) == expected
+    assert expected < round(len(long_enough) * PINNED_CAPTION_PAD_RATIO)
+
+    # The marker still ends up last, with nothing trailing.
+    assert heading_for(long_enough).endswith(PINNED_CAPTION_MARKER)
+
+
+def test_the_heading_padding_survives_regeneration() -> None:
+    """The next pass reads the file the last pass wrote, padding included.
+
+    The interior spaces are what push the marker to the right edge, so losing
+    them on the way through the file would quietly put the glyph back beside the
+    label. Worth checking because they are written into a desktop file and read
+    back out again, which is where trailing whitespace would be trimmed.
+    """
+    pinned, recents = _entries()
+    expected = _expected_heading(pinned, recents)
+    first = build_desktop_content(VENDOR_DESKTOP, pinned, recents)
+    section = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
+
+    assert _parse(first).get(section, "Name") == expected
+    assert f"Name={expected}" in first  # real spaces in the text
+
+    second = build_desktop_content(first, pinned, recents)
+    assert _parse(second).get(section, "Name") == expected
+
+
+def test_empty_lists_leave_only_the_way_in() -> None:
+    """With nothing to list, the pinned heading is the whole menu.
+
+    It is what opens the dialog, so unlike the recents block it is not omitted
+    when it has no entries behind it.
+    """
     content = build_desktop_content(VENDOR_DESKTOP, [], [])
     parser = _parse(content)
-    assert _captions(content) == {}
-    for caption in CAPTION_IDS:
-        assert not parser.has_section(f"Desktop Action {caption}")
+    assert set(_captions(content)) == {PINNED_CAPTION_ACTION_ID}
+    assert not parser.has_section(f"Desktop Action {RECENT_CAPTION_ACTION_ID}")
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-    assert actions == ["new-empty-window", MANAGE_ACTION_ID]
+    assert actions == [
+        "new-empty-window",
+        "_SEPARATOR_",
+        PINNED_CAPTION_ACTION_ID,
+        "_SEPARATOR_",
+    ]
 
 
-def test_manage_action_is_always_present() -> None:
-    """The manager is emitted even with nothing to list.
+def test_the_pinned_heading_is_always_present() -> None:
+    """It is emitted with nothing to list, because it is the only way in.
 
-    It is the only way to pin something from the menu, so hiding it when the
-    lists happen to be empty would leave no way back in.
+    Hiding it when the lists happen to be empty would leave no way to pin
+    anything from the menu at all.
     """
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, [], []))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-    assert actions == ["new-empty-window", MANAGE_ACTION_ID]
-    assert parser.get(f"Desktop Action {MANAGE_ACTION_ID}", "Name") == MANAGE_TEXT
+    assert PINNED_CAPTION_ACTION_ID in actions
+    section = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
+    # Nothing to line up with, so no padding: the marker sits just after the
+    # text rather than a line of spaces away from it.
+    assert parser.get(section, "Name") == pinned_caption_text(0)
+    assert parser.get(section, "Name") == f"{PINNED_CAPTION_BASE}{PINNED_CAPTION_MARKER}"
+    assert parser.get(section, "Exec").endswith(" manage")
 
 
-def test_manage_action_sits_above_the_task_manager_entries() -> None:
-    """Last of all our actions, so Plasma's own entries follow it.
+def test_the_menu_ends_with_a_separator() -> None:
+    """So Plasma's own task-manager entries follow a line, not an entry.
 
     Plasma appends "Pin to Task Manager" / "Unpin from Task Manager" after the
-    whole Actions= list, so being last is what places this directly above them
-    rather than between the pinned and the recents blocks.
+    whole Actions= list, so what we leave last is what they sit under.
     """
     pinned, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
 
-    assert actions[-1] == MANAGE_ACTION_ID
-    assert actions[-2] == "_SEPARATOR_"
-    # Nothing of ours follows it.
-    assert not any(a.startswith(ACTION_PREFIX) for a in actions[actions.index(MANAGE_ACTION_ID) + 1 :])
+    assert actions[-1] == "_SEPARATOR_"
+    # The closing line comes straight after the last entry row, and is the only
+    # thing after it -- nothing of ours trails past it.
+    assert actions[-2].startswith(f"{ACTION_PREFIX}Pinned-")
+    assert len(actions) - 1 == actions.index(actions[-2]) + 1
 
 
-def test_manage_action_launches_the_dialog() -> None:
-    """It is a real action: it runs the CLI's ``manage``, and is not inert."""
+def test_the_pinned_heading_opens_the_manager() -> None:
+    """Clicking "Pinned Files:" runs the CLI's ``manage``, and is not inert."""
     pinned, recents = _entries()
     parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
-    section = f"Desktop Action {MANAGE_ACTION_ID}"
+    section = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
 
-    assert MANAGE_TEXT == "Manage Pinned Files…"
-    assert parser.get(section, "Name") == MANAGE_TEXT
+    assert parser.get(section, "Name") == _expected_heading(pinned, recents)
     assert parser.get(section, "Exec") == f"{desktop_launcher_command()} manage"
     assert parser.get(section, "Exec") != NOOP_EXEC
     # Plasma skips actions carrying NoDisplay, so it stays visible.
     assert not parser.has_option(section, "NoDisplay")
-    # Its icon is distinct from both headings, so it cannot read as one.
-    assert MANAGE_ICON not in (PINNED_CAPTION_ICON, RECENT_CAPTION_ICON)
+    # And its icon is the manager's, which is what says what a click does.
+    assert parser.get(section, "Icon") == PINNED_CAPTION_ICON
+
+
+def test_the_recents_heading_stays_inert() -> None:
+    """Only the pinned heading is clickable; "Recent Files:" must do nothing."""
+    pinned, recents = _entries()
+    parser = _parse(build_desktop_content(VENDOR_DESKTOP, pinned, recents))
+    section = f"Desktop Action {RECENT_CAPTION_ACTION_ID}"
+
+    assert parser.get(section, "Exec") == NOOP_EXEC
 
 
 def test_recent_caption_absent_without_recents() -> None:
@@ -686,20 +800,27 @@ def test_recent_caption_absent_without_recents() -> None:
     assert set(_captions(content)) == {PINNED_CAPTION_ACTION_ID}
 
 
-def test_pinned_caption_absent_without_pinned() -> None:
-    """No pins => no pinned heading, and no separator left dangling above it."""
+def test_pinned_heading_kept_when_nothing_is_pinned() -> None:
+    """No pins => the heading is still there, and is still the way in.
+
+    The realistic empty case: recents to list, nothing pinned yet. The heading
+    is what opens the dialog, so it has to survive with no entries under it --
+    and still carry the launcher, or it would read as clickable and do nothing.
+    """
     _, recents = _entries()
     content = build_desktop_content(VENDOR_DESKTOP, [], recents)
     parser = _parse(content)
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
 
-    assert not parser.has_section(f"Desktop Action {PINNED_CAPTION_ACTION_ID}")
-    assert set(_captions(content)) == {RECENT_CAPTION_ACTION_ID}
-    # One separator opening the recents block, one closing it, then the manager.
-    assert actions.count("_SEPARATOR_") == 2
-    assert actions[-2] == "_SEPARATOR_"
-    assert actions[-1] == MANAGE_ACTION_ID
-    assert actions[actions.index(RECENT_CAPTION_ACTION_ID) - 1] == "_SEPARATOR_"
+    assert parser.has_section(f"Desktop Action {PINNED_CAPTION_ACTION_ID}")
+    assert set(_captions(content)) == {RECENT_CAPTION_ACTION_ID, PINNED_CAPTION_ACTION_ID}
+    section = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
+    assert parser.get(section, "Name") == _expected_heading([], recents)
+    assert parser.get(section, "Exec") == f"{desktop_launcher_command()} manage"
+    # Nothing pinned, so no entry rows between the heading and the closing line.
+    index = actions.index(PINNED_CAPTION_ACTION_ID)
+    assert actions[index + 1] == "_SEPARATOR_"
+    assert actions[index - 1] == "_SEPARATOR_"
 
 
 def test_captions_not_duplicated_on_regeneration() -> None:
@@ -713,95 +834,48 @@ def test_captions_not_duplicated_on_regeneration() -> None:
         assert actions.count(caption) == 1
 
 
-def test_desktop_launcher_names_the_configuration_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_config: WriteConfig
-) -> None:
-    """A click is a bare process launch: it must be told which file to read.
-
-    Regression: the data directory used to be the only thing embedded, so a
-    click resolved the rest from defaults and silently rewrote the menu with
-    them. Naming the file carries every setting at once, including ones added
-    later, and works from a working directory that is not this one.
-    """
-    import kde_vscode_jumplist.desktop_entry as de
-
-    monkeypatch.setattr(de, "_command_launches_cli", lambda command: True)
-    monkeypatch.setattr(de, "_running_program", lambda: None)
-    monkeypatch.setattr(de, "installed_cli_path", lambda: None)
-    monkeypatch.setattr(de, "packaged_cli_path", lambda: None)
-    monkeypatch.setattr(de.shutil, "which", lambda name: None)
-    path = write_config(
-        data_dir=str(tmp_path / "data"),
-        pinned_position="below",
-        max_recents=25,
-    )
-
-    command = desktop_launcher_command()
-
-    assert config_arguments() == ["--config", str(path)]
-    # The option has to precede the subcommand, which is where argparse wants
-    # it -- the generated actions append "open <id>" to this prefix.
-    assert command == f"{resolve_cli_command()} {format_exec(config_arguments())}"
-    assert f"--config {path}" in command
-
-
-def test_desktop_launcher_names_the_configuration_with_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Even a configuration that sets nothing is named as the file to read.
-
-    "Unset means the default applies everywhere" is exactly the assumption that
-    broke: a click is not the process that generated the menu, so it has to be
-    told where the settings are rather than left to find them again.
-    """
-    import kde_vscode_jumplist.desktop_entry as de
-
-    monkeypatch.setattr(de, "_command_launches_cli", lambda command: True)
-    monkeypatch.setattr(de, "_running_program", lambda: None)
-    monkeypatch.setattr(de.shutil, "which", lambda name: None)
-
-    assert config.current().path == config.installed_path()
-    assert config_arguments() == ["--config", str(config.installed_path())]
-
-
 def test_vendor_separator_is_preserved() -> None:
-    """A separator the vendor placed for its own purposes is left alone."""
+    """A separator the vendor placed for its own purposes is left alone.
+
+    Ours follows it, so a vendor file that already ends its Actions= with a
+    separator does end up with two in a row -- the vendor's line is theirs to
+    place, and dropping it would be editing their file.
+    """
     vendor = VENDOR_DESKTOP.replace(
         "Actions=new-empty-window;", "Actions=new-empty-window;_SEPARATOR_;"
     )
     parser = _parse(build_desktop_content(vendor, [], []))
     actions = [a for a in parser.get("Desktop Entry", "Actions").split(";") if a]
-    assert actions == ["new-empty-window", "_SEPARATOR_", MANAGE_ACTION_ID]
+    assert actions == [
+        "new-empty-window",
+        "_SEPARATOR_",  # the vendor's, kept
+        "_SEPARATOR_",  # ours, opening the pinned block
+        PINNED_CAPTION_ACTION_ID,
+        "_SEPARATOR_",
+    ]
 
 
 def test_write_user_desktop_entry_atomic_and_idempotent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     vendor_desktop: Path,
-    write_config: WriteConfig,
 ) -> None:
     import kde_vscode_jumplist.desktop_entry as de
 
-    apps_dir = tmp_path / "applications"
-    write_config(apps_dir=str(apps_dir))
     pinned, recents = _entries()
 
     first = de.write_user_desktop_entry(vendor_desktop, "code", pinned, recents)
     assert first is not None and first.is_file()
+    # It goes where Plasma reads: $XDG_DATA_HOME/applications.
+    assert first.parent == de.paths.user_applications_dir()
     # Identical content => no rewrite.
     second = de.write_user_desktop_entry(vendor_desktop, "code", pinned, recents)
     assert second is None
 
 
 def test_generated_file_marked_and_detected(
-    tmp_path: Path,
     vendor_desktop: Path,
-    write_config: WriteConfig,
 ) -> None:
     import kde_vscode_jumplist.desktop_entry as de
 
-    apps_dir = tmp_path / "applications"
-    write_config(apps_dir=str(apps_dir))
     pinned, recents = _entries()
 
     written = de.write_user_desktop_entry(vendor_desktop, "code", pinned, recents)
@@ -856,7 +930,8 @@ def test_resolve_cli_argv_launches_cli_without_pythonpath() -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    assert resolve_cli_command() == format_exec(argv)
+    # The production launcher is the same argv, formatted for Exec=.
+    assert desktop_launcher_command() == format_exec(argv)
 
 
 def test_resolve_cli_skips_interpreter_that_cannot_import_package(
@@ -942,7 +1017,7 @@ def test_resolve_cli_prefers_the_installed_executable(
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    installed = bin_dir / de.PROG
+    installed = bin_dir / de.APP_NAME
     installed.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("XDG_BIN_HOME", str(bin_dir))
     monkeypatch.setattr(de, "_running_program", lambda: None)
@@ -998,11 +1073,11 @@ def test_candidate_commands_are_deduplicated(
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    installed = bin_dir / de.PROG
+    installed = bin_dir / de.APP_NAME
     installed.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("XDG_BIN_HOME", str(bin_dir))
     monkeypatch.setattr(de, "_running_program", lambda: None)
-    monkeypatch.setattr(de.shutil, "which", lambda name: str(installed) if name == de.PROG else None)
+    monkeypatch.setattr(de.shutil, "which", lambda name: str(installed) if name == de.APP_NAME else None)
     monkeypatch.setattr(de, "packaged_cli_path", lambda: None)
     monkeypatch.setattr(de, "module_source_root", lambda: None)
 
@@ -1106,17 +1181,13 @@ def test_discovery_skips_generated_user_desktop_file(
     monkeypatch: pytest.MonkeyPatch,
     vendor_desktop: Path,
     xdg_dirs: dict[str, Path],
-    write_config: WriteConfig,
 ) -> None:
     """The vendor file must be found even when a generated copy shadows it."""
     import kde_vscode_jumplist.desktop_entry as de
     import kde_vscode_jumplist.discovery as disc
 
-    # _find_desktop_file searches ~/.local/share/applications first (HOME is
-    # redirected to tmp_path by the xdg_dirs fixture); put the generated copy
-    # there so it shadows the system vendor file.
-    apps_dir = tmp_path / ".local" / "share" / "applications"
-    write_config(apps_dir=str(apps_dir))
+    # The generated copy goes where Plasma reads it, shadowing the vendor file.
+    apps_dir = de.paths.user_applications_dir()
 
     pinned, recents = _entries()
     written = de.write_user_desktop_entry(vendor_desktop, "code", pinned, recents)
