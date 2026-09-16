@@ -55,6 +55,7 @@ from .desktop_entry import (
     ICON_FOR_KIND,
     RECENT_CAPTION_ICON,
 )
+from .discovery import current_fork
 from .launcher import open_entry, open_folder
 from .models import MenuEntry
 from .pinned import Pinned
@@ -79,7 +80,7 @@ WINDOW_TITLE = "Manage Pinned Files"
 # Icon for the dialog window. The vendor desktop entry ships ``Icon=vscode``
 # -- the same name the task manager draws its own icon from -- so the dialog is
 # recognisably the one belonging to the application whose menu opened it. A
-# different VS Code variant ships its own name here (VSCodium is ``vscodium``).
+# different fork ships its own name here (CodeBuddy CN is ``buddycn``).
 WINDOW_ICON = "vscode"
 
 # The Wayland app id, which is *not* the icon name: a Wayland client cannot put
@@ -89,6 +90,29 @@ WINDOW_ICON = "vscode"
 # at all, because no ``vscode.desktop`` exists to read it from. Set as the
 # desktop file name before the window is created; see run_dialog.
 WINDOW_APP_ID = "code"
+
+# Window identity per fork: the icon name and the Wayland app id the dialog
+# uses, so it is recognisably the one belonging to the application whose menu
+# opened it -- whatever family that menu belongs to. Both read the fork at
+# call time, since a menu action arrives with the fork baked into its Exec.
+WINDOW_ICONS: dict[str, str] = {
+    "VSCODE": WINDOW_ICON,
+    "BUDDY": "buddycn",
+}
+WINDOW_APP_IDS: dict[str, str] = {
+    "VSCODE": WINDOW_APP_ID,
+    "BUDDY": "buddycn",
+}
+
+
+def window_icon() -> str:
+    """The themed icon name for the selected fork's dialog window."""
+    return WINDOW_ICONS.get(current_fork(), WINDOW_ICON)
+
+
+def window_app_id() -> str:
+    """The desktop file name the compositor reads the fork's window icon from."""
+    return WINDOW_APP_IDS.get(current_fork(), WINDOW_APP_ID)
 
 # Roles carried by every row, relative to Qt's first free one (UserRole). The
 # entry ID is what a selection is mapped back through, so a row is never
@@ -242,7 +266,7 @@ def context_items(entry: MenuEntry) -> tuple[ContextItem, ...]:
     depend on which of the two lists it happens to be listed in.
     """
     return (
-        ContextItem(OPEN_IN_CODE_ACTION, OPEN_IN_CODE_LABEL, OPEN_IN_CODE_ICON, True),
+        ContextItem(OPEN_IN_CODE_ACTION, OPEN_IN_CODE_LABEL, window_icon(), True),
         ContextItem(
             OPEN_FOLDER_ACTION,
             OPEN_FOLDER_LABEL,
@@ -615,7 +639,7 @@ def _build_dialog(model: ManageModel):
 
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle(WINDOW_TITLE)
-    dialog.setWindowIcon(_themed_icon(WINDOW_ICON, 0, QtGui))
+    dialog.setWindowIcon(_themed_icon(window_icon(), 0, QtGui))
     dialog.resize(*WINDOW_SIZE)
 
     # Vertical stack: the panes row, then the footer. Putting the footer in the
@@ -849,7 +873,7 @@ def run_dialog(model: ManageModel) -> bool:
     # <app id>.desktop file the compositor draws the window icon from.
     _use_platform_theme()
     QtCore, QtGui, QtWidgets = _load_qt()
-    QtGui.QGuiApplication.setDesktopFileName(WINDOW_APP_ID)
+    QtGui.QGuiApplication.setDesktopFileName(window_app_id())
     _application(QtWidgets)
 
     dialog = _build_dialog(model)

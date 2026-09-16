@@ -6,13 +6,28 @@ PY ?= python3
 # Run the CLI from this checkout (pytest finds src/ via pyproject.toml).
 CLI := PYTHONPATH=$(CURDIR)/src $(PY) -m kde_vscode_jumplist
 
-# The unit written by `install`: one long-running service that watches VS Code's
-# history and keeps the menu in step. It has an [Install] section, so
-# `systemctl enable` on it is meaningful (unlike the oneshot+timer pair it
-# replaced).
+# The unit written by `install`: one long-running service per fork, watching
+# that fork's history and keeping its menu in step. It has an [Install]
+# section, so `systemctl enable` on it is meaningful (unlike the oneshot+timer
+# pair it replaced).
 SYSTEMCTL ?= systemctl --user
 APP := kde-vscode-jumplist
-SERVICE := $(APP).service
+
+# Which family of editors the targets aim at: VSCODE (the default) or BUDDY for
+# Tencent CodeBuddy CN. An exported shell value wins over the default, and the
+# export carries it down to the CLI -- including `install`, which bakes it into
+# the per-fork systemd unit it writes.
+FORK ?= VSCODE
+export FORK
+
+# One service per fork, named the same way the CLI names it: the VS Code family
+# keeps the historical unit, and CodeBuddy gets its own, so both can be enabled
+# at once without one restarting the other.
+ifeq ($(FORK),BUDDY)
+SERVICE := kde-codebuddy-jumplist.service
+else
+SERVICE := kde-vscode-jumplist.service
+endif
 
 .PHONY: help build recent r update watch pin unpin pinned f manage test install uninstall reset enable disable
 
@@ -39,6 +54,8 @@ help:
 	@echo "                       make watch WATCH=2"
 	@echo "  ARGS                 extra flags for 'recent', e.g."
 	@echo "                       make recent ARGS=--uri"
+	@echo "  FORK                 which editor family to aim at, currently $(FORK); e.g."
+	@echo "                       make recent FORK=BUDDY   # Tencent CodeBuddy CN"
 
 build:
 	@$(PY) $(CURDIR)/tools/build_zipapp.py
@@ -49,7 +66,7 @@ r: recent
 
 update:
 	@$(CLI) update
-	@echo "menu updated - right-click the VS Code task manager icon"
+	@echo "menu updated (fork: $(FORK)) - right-click the task manager icon"
 
 # Foreground loop; Ctrl-C stops it. WATCH=<seconds> changes the interval, and
 # an empty WATCH leaves the CLI's own default in place.

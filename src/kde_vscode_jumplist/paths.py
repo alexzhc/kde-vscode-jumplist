@@ -25,19 +25,59 @@ __all__ = [
     "entries_path",
     "pinned_path",
     "lock_path",
+    "binary_name",
+    "all_binary_names",
     "user_applications_dir",
     "user_bin_dir",
 ]
 
 
+def _current_fork() -> str:
+    """The fork the environment selected.
+
+    Deferred import: :mod:`kde_vscode_jumplist.discovery` imports this module,
+    so the dependency only works this way round.
+    """
+    from .discovery import current_fork
+
+    return current_fork()
+
+
+# State directory name per fork, under $XDG_CONFIG_HOME: each fork keeps its
+# own pinned entries, entry cache and lock, so two watchers can run at once.
+DATA_DIR_NAMES: dict[str, str] = {
+    "VSCODE": APP_NAME,
+    "BUDDY": "kde-buddy-jumplist",
+}
+
+# Executable name per fork, under $XDG_BIN_HOME: one binary per fork, so a
+# menu's actions keep launching even when the other family is not installed.
+BINARY_NAMES: dict[str, str] = {
+    "VSCODE": APP_NAME,
+    "BUDDY": "kde-buddy-jumplist",
+}
+
+
 def data_dir() -> Path:
-    """Directory holding everything this tool saves.
+    """Directory holding everything this tool saves for the selected fork.
 
     ``pinned.json`` (yours, hand-curated), ``entries.json`` (the ID to entry
     map a click resolves through) and ``sync.lock`` all live here:
-    ``~/.config/kde-vscode-jumplist``.
+    ``~/.config/kde-vscode-jumplist`` for the VS Code family,
+    ``~/.config/kde-buddy-jumplist`` for CodeBuddy CN.
     """
-    return xdg_config_home() / APP_NAME
+    return xdg_config_home() / DATA_DIR_NAMES.get(_current_fork(), APP_NAME)
+
+
+def binary_name() -> str:
+    """The executable name the selected fork installs under."""
+    return BINARY_NAMES.get(_current_fork(), APP_NAME)
+
+
+def all_binary_names() -> tuple[str, ...]:
+    """Every fork's executable name, the selected fork's first."""
+    name = binary_name()
+    return (name, *(other for other in BINARY_NAMES.values() if other != name))
 
 
 def ensure_data_dir() -> Path:

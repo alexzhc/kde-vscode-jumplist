@@ -192,6 +192,40 @@ def test_an_older_files_manage_action_is_dropped() -> None:
     assert "/usr/bin/python3 -m" not in content
 
 
+def test_a_fork_menu_bakes_the_fork_into_every_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FORK=BUDDY prefixes every Exec line with ``env FORK=BUDDY``.
+
+    Plasma launches menu actions with no environment of ours, so a CodeBuddy
+    menu action would otherwise resolve the click against the VS Code family's
+    entry cache and pinned list.
+    """
+    import kde_vscode_jumplist.desktop_entry as de
+
+    monkeypatch.setenv("FORK", "BUDDY")
+    monkeypatch.setattr(
+        de, "resolve_cli_argv", lambda python=None: ["/usr/bin/kde-vscode-jumplist"]
+    )
+    monkeypatch.setattr(de.shutil, "which", lambda name: "/usr/bin/env")
+
+    pinned, recents = _entries()
+    parser = _parse(de.build_desktop_content(VENDOR_DESKTOP, pinned, recents))
+
+    prefix = "/usr/bin/env FORK=BUDDY /usr/bin/kde-vscode-jumplist"
+    assert de.desktop_launcher_command() == prefix
+    # Both headings open the manager, every entry action opens its entry, and
+    # none of them may launch without the fork.
+    heading = f"Desktop Action {PINNED_CAPTION_ACTION_ID}"
+    assert parser.get(heading, "Exec") == f"{prefix} manage"
+    for section in parser.sections():
+        if not section.startswith("Desktop Action KdeVsCodeJumpList-"):
+            continue
+        exec_line = parser.get(section, "Exec")
+        assert exec_line.startswith(prefix)
+        assert exec_line.endswith(" manage") or " open " in exec_line
+
+
 def test_legacy_actions_are_replaced() -> None:
     """Pre-0.2 files used '[KdeVsCodeMenu Recent <id>]' groups with spaces.
 

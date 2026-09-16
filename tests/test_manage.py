@@ -78,6 +78,8 @@ from kde_vscode_jumplist.manage import (
     context_items,
     entry_icon,
     run_context_action,
+    window_app_id,
+    window_icon,
 )
 from kde_vscode_jumplist.models import (
     ENTRY_FILE,
@@ -1223,6 +1225,23 @@ def test_app_id_names_the_desktop_file_the_compositor_will_read() -> None:
     """
     assert WINDOW_APP_ID != WINDOW_ICON
     assert WINDOW_APP_ID == Path("code.desktop").stem
+
+
+def test_the_dialog_takes_the_forks_own_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FORK=BUDDY gives the dialog CodeBuddy's icon and Wayland app id.
+
+    The window is recognisably the one belonging to the application whose menu
+    opened it -- whatever family that application belongs to.
+    """
+    assert window_icon() == WINDOW_ICON
+    assert window_app_id() == WINDOW_APP_ID
+
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert window_icon() == "buddycn"
+    assert window_app_id() == "buddycn"
 
 
 def test_click_selection_uses_ctrl_and_shift(tmp_path: Path, monkeypatch) -> None:

@@ -23,7 +23,9 @@ STORAGE_KEY = "history.recentlyOpenedPathsList"
 # Files VS Code itself excludes from dock/taskbar jump lists.
 COMMON_FILES_FILTER = {"COMMIT_EDITMSG", "MERGE_MSG", "git-rebase-todo"}
 
-REMOTE_SCHEMES = {"vscode-remote", "vscode-vfs"}
+# vscode-remote for VS Code itself; forks derive their own scheme the same way
+# from their product.json urlProtocol (vscodium-remote, codebuddycn-remote...).
+REMOTE_SCHEMES = {"vscode-remote", "vscode-vfs", "codebuddycn-remote"}
 
 
 def _read_raw_json(db_path: Path) -> dict | None:

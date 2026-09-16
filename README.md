@@ -54,6 +54,18 @@ Everything else is fixed: the tool keeps its files under
 `~/.local/share/applications`, and finds VS Code itself. There is no
 configuration file and nothing to set up.
 
+One thing is chosen rather than found: which family of editors to aim at. The
+`FORK` environment variable does that — `VSCODE` by default (VS Code,
+Insiders, OSS and VSCodium), `BUDDY` for Tencent CodeBuddy CN:
+
+```bash
+FORK=BUDDY kde-vscode-jumplist recent   # list CodeBuddy's recents instead
+FORK=BUDDY make install                 # and make the service watch CodeBuddy
+```
+
+Set it when installing, too: the service runs where a shell's exports do not
+reach, so `install` bakes the fork into the unit it writes.
+
 ## Details
 
 Install layout, how the menu is built, the dialog's behaviour, the Makefile and

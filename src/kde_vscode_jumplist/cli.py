@@ -27,7 +27,7 @@ from . import APP_NAME, __version__
 from . import desktop_entry
 from . import manage as manage_panel
 from . import paths
-from .discovery import discover_installations
+from .discovery import current_fork, discover_installations
 from .entry_store import EntryStore
 from .pinned import Pinned
 from .launcher import open_entry
@@ -44,6 +44,13 @@ DEFAULT_WATCH_INTERVAL = 5.0
 
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 SERVICE_NAME = "kde-vscode-jumplist.service"
+# One systemd unit per fork: VS Code keeps the historical name, and each
+# further fork gets its own, so both families can be watched at the same time
+# -- each unit owns its fork's menu, and neither restarts the other.
+FORK_SERVICE_NAMES: dict[str, str] = {
+    "VSCODE": SERVICE_NAME,
+    "BUDDY": "kde-codebuddy-jumplist.service",
+}
 # Systemd unit names an older release installed. They are removed on install as
 # well as uninstall, so an upgrade cannot leave a second unit running against the
 # same desktop file: a leftover timer would keep regenerating it, fighting the
@@ -63,12 +70,16 @@ LEGACY_UNIT_NAMES = (
 #
 # The launcher is baked into ExecStart, so the service starts the CLI the same
 # verified way the menu actions do -- systemd inherits nothing, not even PATH.
+# FORK is baked in for the same reason: the watcher must keep aiming at the
+# fork that was selected when it was installed, not at whatever a later shell
+# happens to export.
 SERVICE_TEMPLATE = """\
 [Unit]
-Description=Keep KDE Plasma jump lists in step with VS Code's recent entries
+Description=Keep KDE Plasma jump lists in step with {label} recent entries
 
 [Service]
 Type=simple
+Environment=FORK={fork}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
@@ -76,6 +87,17 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 """
+
+# How the unit's Description names the fork it watches.
+FORK_LABELS: dict[str, str] = {
+    "VSCODE": "VS Code's",
+    "BUDDY": "CodeBuddy's",
+}
+
+
+def service_name() -> str:
+    """The systemd user unit the selected fork installs and runs."""
+    return FORK_SERVICE_NAMES.get(current_fork(), SERVICE_NAME)
 
 
 def _systemctl(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -104,11 +126,15 @@ def install_executable() -> Path | None:
     Returns the installed path, or ``None`` when there is nothing to install --
     a pipx/pip install has no ``bin/`` artifact, and its console script already
     lives somewhere appropriate.
+
+    The copy is named after the selected fork (``kde-buddy-jumplist`` for
+    CodeBuddy CN), so each family's menu actions and service run their own
+    binary and one can be removed without breaking the other.
     """
     built = desktop_entry.packaged_cli_path()
     if built is None:
         return None
-    target = paths.user_bin_dir() / APP_NAME
+    target = paths.user_bin_dir() / paths.binary_name()
     target.parent.mkdir(parents=True, exist_ok=True)
     # Skip the copy when the content already matches, but never skip the
     # executable bit: a plain copy would leave a 0644 file that Plasma cannot
@@ -120,17 +146,21 @@ def install_executable() -> Path | None:
     return target
 
 
-def _remove_installed_executable() -> Path | None:
-    """Delete the executable ``install`` placed in the user's bin directory.
+def _remove_installed_executable() -> list[Path]:
+    """Delete the executables ``install`` placed in the user's bin directory.
 
-    A symlink is left alone: that is how pipx exposes the program, and it is
-    not ours to delete.
+    Every fork's name is tried: the units all run one of these, and uninstall
+    removes them all, so no survivor may be left behind. A symlink is left
+    alone: that is how pipx exposes the program, and it is not ours to delete.
     """
-    target = paths.user_bin_dir() / APP_NAME
-    if not target.is_file() or target.is_symlink():
-        return None
-    target.unlink()
-    return target
+    removed: list[Path] = []
+    for name in paths.all_binary_names():
+        target = paths.user_bin_dir() / name
+        if not target.is_file() or target.is_symlink():
+            continue
+        target.unlink()
+        removed.append(target)
+    return removed
 
 
 def _watch_interval(text: str) -> float:
@@ -365,10 +395,19 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     # The unit runs the same launcher this run resolved; systemd exports
     # nothing, so the watcher has to be started the way the menu actions start
-    # the CLI, without a shell environment to inherit.
+    # the CLI, without a shell environment to inherit. The fork travels the
+    # same way: baked into the unit as FORK=, so the service keeps watching
+    # the editor this install was aimed at. The unit is named after that fork
+    # too, so a second fork's install writes its own unit rather than
+    # replacing this one.
+    fork = current_fork()
+    unit = service_name()
     exec_start = desktop_entry.format_exec([*launcher, "update", "--watch"])
-    (SYSTEMD_USER_DIR / SERVICE_NAME).write_text(
-        SERVICE_TEMPLATE.format(exec_start=exec_start), encoding="utf-8"
+    (SYSTEMD_USER_DIR / unit).write_text(
+        SERVICE_TEMPLATE.format(
+            exec_start=exec_start, fork=fork, label=FORK_LABELS.get(fork, "the editor's")
+        ),
+        encoding="utf-8",
     )
     # enable then restart, rather than enable --now. The latter starts the
     # service but deliberately leaves an *already* running one alone -- wrong
@@ -377,31 +416,37 @@ def cmd_install(args: argparse.Namespace) -> int:
     # regenerating it from that code, so an install looks like it did nothing
     # until something restarts it by hand. `restart` also starts a stopped
     # service, so the two calls cover both cases.
-    for command in (("daemon-reload",), ("enable", SERVICE_NAME), ("restart", SERVICE_NAME)):
+    for command in (("daemon-reload",), ("enable", unit), ("restart", unit)):
         result = _systemctl(*command)
         if result.returncode != 0:
             log.error("systemctl %s failed: %s", " ".join(command), result.stderr.strip())
             return result.returncode
     print(
-        f"installed {SERVICE_NAME} (watching every {_seconds_text(DEFAULT_WATCH_INTERVAL)})\n"
+        f"installed {unit} (watching every {_seconds_text(DEFAULT_WATCH_INTERVAL)})\n"
+        f"fork:           {current_fork()}\n"
         f"data directory: {paths.data_dir()}\n"
         f"menu file:      {desktop_entry.paths.user_applications_dir()}\n"
-        f"follow it with: systemctl --user status {SERVICE_NAME}"
+        f"follow it with: systemctl --user status {unit}"
     )
     return 0
 
 
 def cmd_uninstall(_args: argparse.Namespace) -> int:
-    for name in (SERVICE_NAME, *LEGACY_UNIT_NAMES):
+    # Every fork's unit goes, not just the selected one: they all run the one
+    # installed executable removed below, so a survivor would be left running a
+    # file that is no longer there.
+    names = (*FORK_SERVICE_NAMES.values(), *LEGACY_UNIT_NAMES)
+    existing = [name for name in names if (SYSTEMD_USER_DIR / name).exists()]
+    for name in names:
         _systemctl("disable", "--now", name)
-    for name in (SERVICE_NAME, *LEGACY_UNIT_NAMES):
+    for name in names:
         (SYSTEMD_USER_DIR / name).unlink(missing_ok=True)
     _systemctl("daemon-reload")
-    print(f"uninstalled {SERVICE_NAME}")
+    print(f"uninstalled {', '.join(existing) or service_name()}")
 
     removed = _remove_installed_executable()
-    if removed is not None:
-        print(f"removed {removed}")
+    for path in removed:
+        print(f"removed {path}")
     return 0
 
 
@@ -522,8 +567,8 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser(
         "install",
         help=(
-            f"install the executable to {paths.user_bin_dir()} and a {SERVICE_NAME} "
-            f"watching the menu to {SYSTEMD_USER_DIR}"
+            f"install the executable to {paths.user_bin_dir()} and a systemd user"
+            f" unit watching the menu to {SYSTEMD_USER_DIR}"
         ),
     )
     install.set_defaults(func=cmd_install)

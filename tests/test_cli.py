@@ -203,7 +203,7 @@ def _fake_systemctl(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 
 def _unit_environment(path: Path) -> dict[str, str]:
-    """``Environment=`` entries from a unit file, which there must never be.
+    """``Environment=`` entries from a unit file.
 
     Read line by line rather than with configparser, which rejects the repeated
     keys a unit file legitimately has.
@@ -236,6 +236,7 @@ def test_install_writes_one_long_running_service(
     """A single Type=simple service replaces the oneshot+timer pair."""
     # No executable in play: this test is about the unit file itself.
     monkeypatch.setattr(cli.desktop_entry, "packaged_cli_path", lambda: None)
+    monkeypatch.delenv("FORK", raising=False)
     calls = _fake_systemctl(monkeypatch)
 
     assert cli.main(["install"]) == 0
@@ -257,8 +258,10 @@ def test_install_writes_one_long_running_service(
     assert parser.get("Service", "ExecStart") == _expected_exec_start(
         "/usr/bin/kde-vscode-jumplist"
     )
-    # Nothing is configured that way any more.
-    assert _unit_environment(service) == {}
+    # The fork travels as Environment=: the service runs where a shell's
+    # exports do not reach, so install resolves FORK and bakes it into the
+    # unit. With nothing exported, that is the default fork.
+    assert _unit_environment(service) == {"FORK": "VSCODE"}
     # A long-running process that dies should come back on its own.
     assert parser.get("Service", "Restart") == "on-failure"
     # And it can be enabled, which the oneshot service deliberately could not.
@@ -273,6 +276,70 @@ def test_install_writes_one_long_running_service(
         ["systemctl", "--user", "enable", cli.SERVICE_NAME],
         ["systemctl", "--user", "restart", cli.SERVICE_NAME],
     ]
+
+
+def test_install_bakes_the_selected_fork_into_the_service(
+    systemd_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FORK=BUDDY at install time makes the watcher aim at CodeBuddy CN."""
+    monkeypatch.setattr(cli.desktop_entry, "packaged_cli_path", lambda: None)
+    calls = _fake_systemctl(monkeypatch)
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert cli.main(["install"]) == 0
+
+    # One unit per fork: the CodeBuddy watcher gets its own name rather than
+    # replacing the VS Code one, so both families can be enabled at once.
+    service = systemd_dir / "kde-codebuddy-jumplist.service"
+    assert _unit_environment(service) == {"FORK": "BUDDY"}
+    assert not (systemd_dir / cli.SERVICE_NAME).exists()
+    assert ["systemctl", "--user", "enable", "kde-codebuddy-jumplist.service"] in calls
+
+
+def test_install_names_the_executable_after_the_fork(
+    systemd_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FORK=BUDDY installs kde-buddy-jumplist, its own binary.
+
+    One binary per fork: removing one family must not break the other's menu
+    actions or service.
+    """
+    built = tmp_path / "build" / "kde-vscode-jumplist"
+    built.parent.mkdir(parents=True)
+    built.write_text("#!/bin/sh\necho built\n", encoding="utf-8")
+    monkeypatch.setattr(cli.desktop_entry, "packaged_cli_path", lambda: built)
+    _fake_systemctl(monkeypatch)
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert cli.main(["install"]) == 0
+
+    installed = user_bin_dir() / "kde-buddy-jumplist"
+    assert installed.is_file()
+    assert installed.read_bytes() == built.read_bytes()
+    # The unit runs the fork's own binary.
+    assert _exec_start(systemd_dir / "kde-codebuddy-jumplist.service") == (
+        _expected_exec_start(str(installed))
+    )
+
+
+def test_uninstall_removes_every_forks_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uninstalling one fork removes the other's binary as well.
+
+    Uninstall removes every fork's unit, and they all run one of these
+    executables -- a survivor would be left running a file that is gone.
+    """
+    bin_dir = user_bin_dir()
+    bin_dir.mkdir(parents=True)
+    binaries = [bin_dir / name for name in cli.paths.all_binary_names()]
+    for binary in binaries:
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    _fake_systemctl(monkeypatch)
+
+    assert cli.main(["uninstall"]) == 0
+
+    assert all(not binary.exists() for binary in binaries)
 
 
 def test_install_removes_obsolete_units(
@@ -363,7 +430,7 @@ def test_uninstall_removes_every_known_unit(
     systemd_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     systemd_dir.mkdir(parents=True)
-    names = (cli.SERVICE_NAME, *cli.LEGACY_UNIT_NAMES)
+    names = (*cli.FORK_SERVICE_NAMES.values(), *cli.LEGACY_UNIT_NAMES)
     for name in names:
         (systemd_dir / name).write_text("[Unit]\n", encoding="utf-8")
     calls = _fake_systemctl(monkeypatch)

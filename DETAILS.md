@@ -364,6 +364,16 @@ feeds its own generated menu file. The shared database
 one, because on most installs -- this one included -- that is where the recently
 opened list actually lives.
 
+Which *family* of editors is aimed at is the one choice: the `FORK`
+environment variable, `VSCODE` by default and `BUDDY` for Tencent CodeBuddy CN
+(`buddycn`, `~/.config/CodeBuddy CN`, no shared database). It is read at call
+time, and an unknown or empty value falls back to the default. The service is
+where a shell's exports do not reach, so `install` resolves the fork and writes
+it into the unit as `Environment=FORK=...`; `FORK=BUDDY make install` is the
+way to switch the watcher over. Clicks need no fork at all: a menu action
+resolves the entry's own editor across every fork, since Plasma launches it
+with no FORK of its own.
+
 ### How the menu is built
 
 Two things about the menu are fixed in the code as well:

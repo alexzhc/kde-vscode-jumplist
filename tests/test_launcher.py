@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from kde_vscode_jumplist import launcher
 from kde_vscode_jumplist.discovery import Installation
 from kde_vscode_jumplist.launcher import build_command
 from kde_vscode_jumplist.models import ENTRY_FILE, ENTRY_FOLDER, ENTRY_WORKSPACE, MenuEntry
@@ -67,3 +68,29 @@ def test_no_shell_metacharacters_in_argv() -> None:
     entry = MenuEntry(ENTRY_FOLDER, uri, "odd", "code")
     command = build_command(_install(), entry)
     assert command[-1] == uri  # one element, unescaped
+
+
+def test_open_resolves_the_entrys_own_editor_across_forks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A click opens the editor the entry came from, fork selection or not.
+
+    Plasma launches a menu action with no FORK of its own, so resolving an
+    entry cannot be limited to the selected fork: a CodeBuddy entry must open
+    in CodeBuddy even when nothing selected that fork.
+    """
+    buddy = _install(variant="codebuddycn", executable="/usr/bin/buddycn")
+    code = _install(variant="code")
+    entry = MenuEntry(ENTRY_FOLDER, "file:///home/user/proj", "proj", "codebuddycn")
+    monkeypatch.setattr(launcher, "discover_all_installations", lambda: [code, buddy])
+    launched: list[list[str]] = []
+
+    def record(command: list[str]) -> int:
+        launched.append(command)
+        return 0
+
+    monkeypatch.setattr(launcher, "_spawn", record)
+
+    assert launcher.open_entry(entry) == 0
+
+    assert launched == [["/usr/bin/buddycn", "--folder-uri", "file:///home/user/proj"]]

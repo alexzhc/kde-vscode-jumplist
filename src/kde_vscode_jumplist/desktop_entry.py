@@ -205,9 +205,34 @@ def keep_recent(entries: list[MenuEntry]) -> list[MenuEntry]:
     return [entry for entry in entries if entry.kind not in excluded]
 
 
+def _launcher_fork() -> str:
+    """The fork whose menu is being generated.
+
+    Deferred import: :mod:`kde_vscode_jumplist.discovery` imports this module,
+    so the dependency only works this way round. Read at call time like
+    everywhere else, so a watcher serving one fork writes that fork's menus
+    whatever shell started it.
+    """
+    from .discovery import current_fork
+
+    return current_fork()
+
+
 def desktop_launcher_command() -> str:
-    """``Exec=``-ready launcher for the desktop actions."""
-    return format_exec(resolve_cli_argv())
+    """``Exec=``-ready launcher for the desktop actions.
+
+    For a fork other than VS Code's, the fork is baked in as an ``env``
+    prefix: Plasma launches menu actions with no environment of ours, and the
+    action has to find the same fork's pinned entries and entry cache the
+    watcher wrote them to.
+    """
+    command = resolve_cli_argv()
+    fork = _launcher_fork()
+    if fork != "VSCODE":
+        env = shutil.which("env")
+        if env:
+            command = [env, f"FORK={fork}", *command]
+    return format_exec(command)
 
 
 def _sanitize_label(label: str) -> str:
@@ -289,10 +314,15 @@ def installed_cli_path() -> Path | None:
     """The executable ``install`` placed in the user's bin directory, if any.
 
     Preferred over everything else but the running program: unlike a build
-    artifact in a working tree, it stays valid when the checkout moves.
+    artifact in a working tree, it stays valid when the checkout moves. The
+    selected fork's own name is looked for first, so a fork's menu bakes its
+    own binary into its Exec lines.
     """
-    candidate = paths.user_bin_dir() / APP_NAME
-    return candidate if candidate.is_file() else None
+    for name in paths.all_binary_names():
+        candidate = paths.user_bin_dir() / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _candidate_cli_commands(python: str | None = None) -> list[list[str]]:

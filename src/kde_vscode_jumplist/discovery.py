@@ -7,6 +7,7 @@ generated user desktop entry.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,17 +18,37 @@ from .xdg import xdg_data_dirs, xdg_data_home
 
 log = logging.getLogger(__name__)
 
-# Known variants: (installation id, executable names, user-data dir name)
-VARIANTS: list[tuple[str, tuple[str, ...], str]] = [
-    ("code", ("code",), ".config/Code"),
-    ("code-insiders", ("code-insiders",), ".config/Code - Insiders"),
-    ("code-oss", ("code-oss",), ".config/Code - OSS"),
-    ("vscodium", ("codium",), ".config/VSCodium"),
+# Known variants: (installation id, executable names, user-data dir name, fork).
+# The fork groups variants into the families the FORK environment variable
+# chooses between.
+VARIANTS: list[tuple[str, tuple[str, ...], str, str]] = [
+    ("code", ("code",), ".config/Code", "VSCODE"),
+    ("code-insiders", ("code-insiders",), ".config/Code - Insiders", "VSCODE"),
+    ("code-oss", ("code-oss",), ".config/Code - OSS", "VSCODE"),
+    ("vscodium", ("codium",), ".config/VSCodium", "VSCODE"),
+    # Tencent CodeBuddy CN, a VS Code fork. Names measured against its deb
+    # install: product.json carries applicationName "buddycn" and dataFolderName
+    # ".codebuddycn", and the recent list lives in the profile database only
+    # (no sharedDataFolderName, so no shared-database entry below).
+    ("codebuddycn", ("buddycn",), ".config/CodeBuddy CN", "BUDDY"),
 ]
 
 # variant -> the subdirectory of $HOME holding its user data. Derived from
 # VARIANTS so the two cannot drift apart.
-USER_DATA_DIRS: dict[str, str] = {variant: user_data for variant, _names, user_data in VARIANTS}
+USER_DATA_DIRS: dict[str, str] = {
+    variant: user_data for variant, _names, user_data, _fork in VARIANTS
+}
+
+# fork -> its variants. Derived from VARIANTS the same way, so a variant cannot
+# be left out of its own fork's selection.
+FORK_GROUPS: dict[str, tuple[str, ...]] = {}
+for _variant, _names, _user_data, _fork in VARIANTS:
+    FORK_GROUPS[_fork] = (*FORK_GROUPS.get(_fork, ()), _variant)
+
+# The FORK environment variable picks which family of editors is aimed at:
+# VSCODE (the default) for the VS Code family, BUDDY for Tencent CodeBuddy CN.
+FORK_ENV = "FORK"
+DEFAULT_FORK = "VSCODE"
 
 # Desktop entry file names per variant, in preference order.
 DESKTOP_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -35,6 +56,7 @@ DESKTOP_CANDIDATES: dict[str, tuple[str, ...]] = {
     "code-insiders": ("code-insiders.desktop",),
     "code-oss": ("code-oss.desktop",),
     "vscodium": ("vscodium.desktop", "codium.desktop"),
+    "codebuddycn": ("buddycn.desktop", "buddycn-url-handler.desktop"),
 }
 
 FLATPAK_APPS: dict[str, tuple[str, str, str]] = {
@@ -161,15 +183,31 @@ def _flatpak_installation(variant: str) -> Installation | None:
     )
 
 
-def discover_installations() -> list[Installation]:
-    """Detect all usable VS Code installations for the current user.
+def current_fork() -> str:
+    """The fork the environment selected, normalized.
 
-    Every variant with an executable, a desktop file and a state database is
-    reported, along with any Flatpak installation of it. Nothing is configured:
-    what is found is what is read.
+    ``FORK`` is read at call time so the service (which carries the value in
+    its unit) and a shell command agree. The value is case-insensitive, and an
+    unknown or empty one falls back to the default rather than matching
+    nothing.
     """
+    fork = os.environ.get(FORK_ENV, DEFAULT_FORK).strip().upper() or DEFAULT_FORK
+    if fork not in FORK_GROUPS:
+        log.warning("unknown FORK=%r; using %s", fork, DEFAULT_FORK)
+        return DEFAULT_FORK
+    return fork
+
+
+def selected_variants() -> tuple[str, ...]:
+    """Variants the selected fork covers — the installations that get a menu."""
+    return FORK_GROUPS[current_fork()]
+
+
+def _discover(variants: frozenset[str] | set[str]) -> list[Installation]:
     found: list[Installation] = []
-    for variant, names, _user_data in VARIANTS:
+    for variant, names, _user_data, _fork in VARIANTS:
+        if variant not in variants:
+            continue
         executable = _find_executable(names)
         desktop = _find_desktop_file(DESKTOP_CANDIDATES.get(variant, (f"{variant}.desktop",)))
         db = _state_db_for(variant)
@@ -188,3 +226,24 @@ def discover_installations() -> list[Installation]:
         if flatpak is not None:
             found.append(flatpak)
     return found
+
+
+def discover_installations() -> list[Installation]:
+    """Detect the installations of the selected fork for the current user.
+
+    Every variant with an executable, a desktop file and a state database is
+    reported, along with any Flatpak installation of it. Nothing is configured:
+    what is found is what is read. Which family of variants is looked for is
+    the :data:`FORK_ENV` environment variable's business (default VS Code).
+    """
+    return _discover(set(selected_variants()))
+
+
+def discover_all_installations() -> list[Installation]:
+    """Every known installation, whatever fork the environment selected.
+
+    Used to resolve a click: an entry names the editor it came from, and that
+    editor has to be found even when it belongs to a fork that is not the
+    selected one (Plasma launches a menu action with no FORK of its own).
+    """
+    return _discover({variant for variant, _names, _user_data, _fork in VARIANTS})

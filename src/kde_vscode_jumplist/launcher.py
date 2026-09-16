@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .discovery import Installation, discover_installations
+from .discovery import Installation, discover_all_installations
 from .models import ENTRY_FILE, ENTRY_FOLDER, ENTRY_WORKSPACE, MenuEntry
 
 log = logging.getLogger(__name__)
@@ -69,8 +69,16 @@ def _spawn(command: list[str]) -> int:
 
 
 def open_entry(entry: MenuEntry, installations: list[Installation] | None = None) -> int:
-    """Launch VS Code for ``entry``. Returns the process exit status."""
-    installations = installations if installations is not None else discover_installations()
+    """Launch VS Code for ``entry``. Returns the process exit status.
+
+    The default search ignores :envvar:`FORK`: an entry names the editor it
+    came from, and a menu click runs under Plasma, which has no FORK of its
+    own — so the entry's own installation is looked for across every fork,
+    falling back to whatever is installed.
+    """
+    installations = (
+        installations if installations is not None else discover_all_installations()
+    )
     installation = next((i for i in installations if i.variant == entry.source), None)
     if installation is None:
         installation = installations[0] if installations else None

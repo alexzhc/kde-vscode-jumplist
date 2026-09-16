@@ -115,11 +115,13 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect HOME so discovery cannot find the developer's real VS Code.
 
     ``_shared_state_db_for`` looks under HOME, so without this the assertions
-    below would depend on the machine running the suite.
+    below would depend on the machine running the suite. FORK is cleared for
+    the same reason: a shell that exported it must not steer the tests.
     """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("FORK", raising=False)
     return home
 
 
@@ -130,6 +132,22 @@ def _install_fake_code(home: Path) -> tuple[Path, Path]:
     desktop.parent.mkdir(parents=True, exist_ok=True)
     desktop.write_text("[Desktop Entry]\nName=x\nExec=x\n", encoding="utf-8")
     return db, desktop
+
+
+def _install_fake_buddy(home: Path) -> Path:
+    """A detectable CodeBuddy CN, laid out the way its deb install lays it out."""
+    db = make_state_db(
+        home / ".config" / "CodeBuddy CN" / "User" / "globalStorage" / "state.vscdb", {}
+    )
+    desktop = home / "share" / "applications" / "buddycn.desktop"
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text("[Desktop Entry]\nName=x\nExec=x\n", encoding="utf-8")
+    return db
+
+
+def _which_of(names: dict[str, str]):
+    """A ``shutil.which`` stand-in answering only for the given executables."""
+    return lambda name: names.get(name)
 
 
 def test_detection_finds_a_standard_installation(
@@ -169,6 +187,137 @@ def test_the_shared_database_is_found_when_present(
     found = discovery.discover_installations()
 
     assert [i.shared_state_db for i in found] == [shared]
+
+
+# --- FORK selection -------------------------------------------------------
+
+
+def test_both_editors_installed_default_aims_at_vs_code(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without FORK, the VS Code family is found and CodeBuddy is not."""
+    db, _desktop = _install_fake_code(fake_home)
+    _install_fake_buddy(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(
+        discovery.shutil, "which", _which_of({"code": "/usr/bin/code", "buddycn": "/usr/bin/buddycn"})
+    )
+
+    found = discovery.discover_installations()
+
+    assert [(i.variant, i.state_db) for i in found] == [("code", db)]
+
+
+def test_fork_buddy_aims_at_codebuddy(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FORK=BUDDY finds CodeBuddy CN and leaves the VS Code family alone."""
+    _install_fake_code(fake_home)
+    db = _install_fake_buddy(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(
+        discovery.shutil, "which", _which_of({"code": "/usr/bin/code", "buddycn": "/usr/bin/buddycn"})
+    )
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    found = discovery.discover_installations()
+
+    assert [(i.variant, i.state_db) for i in found] == [("codebuddycn", db)]
+
+
+def test_fork_is_case_insensitive(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`FORK=buddy` is the same fork as `FORK=BUDDY`."""
+    _install_fake_buddy(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(discovery.shutil, "which", _which_of({"buddycn": "/usr/bin/buddycn"}))
+    monkeypatch.setenv("FORK", "buddy")
+
+    assert [i.variant for i in discovery.discover_installations()] == ["codebuddycn"]
+
+
+def test_fork_buddy_without_codebuddy_finds_nothing(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A code-only machine aimed at BUDDY reports no installation."""
+    _install_fake_code(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(discovery.shutil, "which", _which_of({"code": "/usr/bin/code"}))
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert discovery.discover_installations() == []
+
+
+def test_an_unknown_fork_falls_back_to_vs_code(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo in FORK finds the default family rather than nothing."""
+    db, _desktop = _install_fake_code(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(discovery.shutil, "which", _which_of({"code": "/usr/bin/code"}))
+    monkeypatch.setenv("FORK", "NOT-A-FORK")
+
+    found = discovery.discover_installations()
+
+    assert [(i.variant, i.state_db) for i in found] == [("code", db)]
+
+
+def test_the_data_dir_is_per_fork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FORK=BUDDY keeps its state beside the VS Code family's, not inside it.
+
+    Two watchers run at once, so they cannot share one pinned list, one entry
+    cache or one lock.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert data_dir() == tmp_path / "xdg" / "kde-buddy-jumplist"
+    assert pinned_path() == data_dir() / "pinned.json"
+    assert paths.lock_path() == data_dir() / "sync.lock"
+
+
+def test_the_installed_binary_is_per_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each fork installs its own executable, the selected fork's first."""
+    assert paths.binary_name() == APP_NAME
+    assert paths.all_binary_names() == (APP_NAME, "kde-buddy-jumplist")
+
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    assert paths.binary_name() == "kde-buddy-jumplist"
+    assert paths.all_binary_names() == ("kde-buddy-jumplist", APP_NAME)
+
+
+def test_an_empty_fork_is_the_default(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FORK= (an empty export) must not select nothing."""
+    _install_fake_code(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(discovery.shutil, "which", _which_of({"code": "/usr/bin/code"}))
+    monkeypatch.setenv("FORK", "")
+
+    assert discovery.current_fork() == "VSCODE"
+    assert [i.variant for i in discovery.discover_installations()] == ["code"]
+
+
+def test_every_installation_is_found_whatever_the_fork(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unfiltered search is what resolves a click, fork or no fork."""
+    _install_fake_code(fake_home)
+    _install_fake_buddy(fake_home)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(fake_home / "share"))
+    monkeypatch.setattr(
+        discovery.shutil, "which", _which_of({"code": "/usr/bin/code", "buddycn": "/usr/bin/buddycn"})
+    )
+    monkeypatch.setenv("FORK", "BUDDY")
+
+    variants = {i.variant for i in discovery.discover_all_installations()}
+
+    assert variants == {"code", "codebuddycn"}
 
 
 # --- end to end -----------------------------------------------------------

@@ -65,6 +65,11 @@ def _isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_BIN_HOME", str(tmp_path / "bin"))
     monkeypatch.setenv("HOME", str(tmp_path))
+    # FORK is cleared as well: it steers the data directory, the installed
+    # binary and the generated menus, so an ambient export (say
+    # ``make test FORK=BUDDY``) must not steer the suite. Tests that are about
+    # a fork set it themselves.
+    monkeypatch.delenv("FORK", raising=False)
 
 
 @pytest.fixture()
