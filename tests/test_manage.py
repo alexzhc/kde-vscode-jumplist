@@ -37,7 +37,6 @@ from kde_vscode_jumplist.desktop_entry import (
 )
 from kde_vscode_jumplist.manage import (
     ABOUT_BUTTON_LABEL,
-    ABOUT_FIELDS,
     BUTTON_ACTION_PROPERTY,
     BUTTON_SIZE,
     CLOSE_BUTTON_LABEL,
@@ -74,6 +73,7 @@ from kde_vscode_jumplist.manage import (
     WINDOW_ICON,
     DialogUnavailable,
     ManageModel,
+    about_fields,
     build_about_dialog,
     context_items,
     entry_icon,
@@ -1403,25 +1403,38 @@ def test_shift_range_does_not_survive_a_click_in_the_other_pane(
     assert seen["no_stale_range"] == [4]
 
 
-def test_about_fields_are_the_requested_four() -> None:
-    """Project, Version, Author and Github, in that order and nothing else."""
+def test_about_fields_are_the_requested_five() -> None:
+    """Project, Version, Commit, Author and Github, in that order and nothing else."""
     from kde_vscode_jumplist import __author__, __url__, __version__
+    from kde_vscode_jumplist.buildinfo import git_id
 
-    assert [label for label, _value in ABOUT_FIELDS] == [
+    fields = about_fields()
+    assert [label for label, _value in fields] == [
         "Project",
         "Version",
+        "Commit",
         "Author",
         "Github",
     ]
-    values = dict(ABOUT_FIELDS)
+    values = dict(fields)
     assert values["Project"] == APP_NAME == "kde-vscode-jumplist"
     assert values["Version"] == __version__
+    assert values["Commit"] == git_id()
     assert values["Author"] == __author__
     assert values["Github"] == __url__
     assert values["Github"].startswith("https://")
     # The dialog takes each fact straight from the package, so these cannot be
     # written out by hand and drift.
     assert values["Version"] != values["Author"]
+
+
+def test_about_commit_is_shortened() -> None:
+    """A bare id, not the 40-character one: it has to be readable in a window."""
+    from kde_vscode_jumplist.buildinfo import GIT_ID_LENGTH, GIT_ID_UNKNOWN
+
+    value = dict(about_fields())["Commit"]
+    assert len(value) <= GIT_ID_LENGTH or value == GIT_ID_UNKNOWN
+    assert "\n" not in value and " " not in value
 
 
 def test_project_url_matches_pyproject() -> None:
@@ -1440,7 +1453,7 @@ def test_project_url_matches_pyproject() -> None:
 
 
 def test_about_dialog_is_one_page_with_every_field() -> None:
-    """All four facts on one page, with no logo and no credits.
+    """Every fact on one page, with no logo and no credits.
 
     That is why it is hand-built rather than a richer About box: those bring a
     large icon and a second page of credits, and neither is wanted.
@@ -1460,12 +1473,12 @@ def test_about_dialog_is_one_page_with_every_field() -> None:
 
     # Every field is present, as a dimmed heading and its value.
     shown = [label.text() for label in labels if label.text()]
-    for heading, _value in ABOUT_FIELDS:
+    for heading, _value in about_fields():
         assert f"{heading}:" in shown, heading
     # The URL is shown in full, and is the one clickable thing on the page.
     links = [label for label in labels if label.openExternalLinks()]
     assert len(links) == 1
-    assert dict(ABOUT_FIELDS)["Github"] in links[0].text()
+    assert dict(about_fields())["Github"] in links[0].text()
 
     # A single Close, and nothing resembling a credits button.
     buttons = {button.text() for button in about.findChildren(QtWidgets.QPushButton)}
@@ -1481,6 +1494,7 @@ def test_about_values_are_copied_from_the_package() -> None:
     QtWidgets = _qt_or_skip().QtWidgets
     _ensure_app()
     from kde_vscode_jumplist import __author__, __url__, __version__
+    from kde_vscode_jumplist.buildinfo import git_id
 
     parent = QtWidgets.QWidget()
     about = build_about_dialog(parent)
@@ -1492,6 +1506,7 @@ def test_about_values_are_copied_from_the_package() -> None:
 
     assert APP_NAME in shown
     assert __version__ in shown
+    assert git_id() in shown
     assert __author__ in shown
     # The URL is the link's href rather than its text, since the text is the URL.
     links = [label for label in about.findChildren(QtWidgets.QLabel) if label.openExternalLinks()]

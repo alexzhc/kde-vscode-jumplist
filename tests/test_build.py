@@ -72,6 +72,32 @@ def test_archive_contains_package_dependencies_and_entry_point(built: Path) -> N
     assert not [name for name in names if "__pycache__" in name or name.endswith(".pyc")]
 
 
+def test_archive_carries_the_commit_it_was_built_from(built: Path) -> None:
+    """The bundled copy has no .git of its own, so the build stamps the id in.
+
+    Without it the About window of an installed copy would have nothing to show.
+    """
+    module = _build_module()
+    with zipfile.ZipFile(built) as archive:
+        names = archive.namelist()
+        source = archive.read(
+            f"{module.PACKAGE_NAME}/{module.GIT_ID_MODULE}"
+        ).decode("utf-8")
+
+    assert f"{module.PACKAGE_NAME}/{module.GIT_ID_MODULE}" in names
+    assert f"GIT_ID = {module.git_id()!r}" in source
+
+
+def test_git_id_constants_match_the_package() -> None:
+    """The stamp must be the shape buildinfo reads, so the two cannot drift."""
+    from kde_vscode_jumplist import buildinfo
+
+    module = _build_module()
+    assert module.GIT_ID_LENGTH == buildinfo.GIT_ID_LENGTH
+    assert module.GIT_ID_UNKNOWN == buildinfo.GIT_ID_UNKNOWN
+    assert module.GIT_ID_MODULE == f"{buildinfo.BUILD_ID_MODULE}.py"
+
+
 def test_archive_entry_point_calls_main(built: Path) -> None:
     with zipfile.ZipFile(built) as archive:
         main = archive.read("__main__.py").decode("utf-8")

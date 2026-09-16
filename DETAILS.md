@@ -262,11 +262,19 @@ never change the pinned entries or dirty the dialog.
   pinned entries in the right, and the four buttons between them](screenshots/manage_pinned_files.png)
 
   The footer row has **About** at the left edge and **Close** at the right. About
-opens a single page listing the project name, version, author
+opens a single page listing the project name, version, commit, author
 and the GitHub URL (which is clickable), each read from the package or
 `pyproject.toml` rather than written out, with a test keeping the two in
 step. It is a plain dialog rather than a richer About box, which would add a
 large logo and a separate credits page that this does not need.
+
+  The commit is shown abbreviated (7 characters), and comes from
+  `buildinfo.git_id()`: the checkout is asked directly when the program runs from
+  source, while an installed copy is a zipapp that carries no `.git` of its own,
+  so `make build` stamps the id into the copy it bundles. Where neither is
+  available — a build outside a repository, or a machine with no git — the window
+  says `unknown` rather than failing to open, and the id is read once and cached,
+  since it cannot change under a running process.
 - The dialog is drawn with **Qt 6** (PyQt6), in a two-pane shape. Qt is chosen
 because it draws the desktop's *own* style: with the KDE platform theme loaded it
 uses Breeze and resolves the same icon names the jump list uses, so the dialog and

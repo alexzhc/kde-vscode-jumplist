@@ -48,6 +48,7 @@ from collections.abc import Iterable
 from typing import NamedTuple
 
 from . import APP_NAME, __author__, __url__, __version__
+from .buildinfo import git_id
 from .desktop_entry import (
     DEFAULT_ICON,
     PINNED_CAPTION_ICON,
@@ -143,14 +144,6 @@ UP_TOOLTIP = "Move up"
 DOWN_TOOLTIP = "Move down"
 TOOLTIP_FOR_ACTION = {PIN_ACTION: PIN_TOOLTIP, UNPIN_ACTION: UNPIN_TOOLTIP}
 
-# What the About window reports, as data rather than as dialog lines: the four
-# facts are checked directly by the tests, and the dialog is built from them.
-ABOUT_FIELDS: tuple[tuple[str, str], ...] = (
-    ("Project", APP_NAME),
-    ("Version", __version__),
-    ("Author", __author__),
-    ("Github", __url__),
-)
 ABOUT_BUTTON_LABEL = "About"
 CLOSE_BUTTON_LABEL = "Close"
 
@@ -546,12 +539,29 @@ def _entry_list_class(QtCore, QtWidgets):
     return _ENTRY_LIST_CLASS
 
 
-def build_about_dialog(parent) -> object:
-    """The About window: project, version, author and repository on one page.
+def about_fields() -> tuple[tuple[str, str], ...]:
+    """What the About window reports, as data rather than as dialog lines.
 
-    Hand-built rather than using a richer About box: the four facts are the whole
-    content, so they are laid out as a label/value grid with a Close button and
-    nothing else -- no logo, and no second page of credits.
+    The facts are checked directly by the tests, and the dialog is built from
+    them. A function rather than a constant because the commit is read from git:
+    that shells out, and nothing but this one window wants it, so importing the
+    module must not pay for it.
+    """
+    return (
+        ("Project", APP_NAME),
+        ("Version", __version__),
+        ("Commit", git_id()),
+        ("Author", __author__),
+        ("Github", __url__),
+    )
+
+
+def build_about_dialog(parent) -> object:
+    """The About window: project, version, commit, author and repository.
+
+    All of it on one page. Hand-built rather than using a richer About box: those
+    facts are the whole content, so they are laid out as a label/value grid with
+    a Close button and nothing else -- no logo, and no second page of credits.
 
     Returned rather than shown, so the window can be inspected without a display
     (see the tests).
@@ -566,7 +576,7 @@ def build_about_dialog(parent) -> object:
     grid = QtWidgets.QGridLayout()
     grid.setColumnStretch(1, 1)
     outer.addLayout(grid)
-    for row, (label, value) in enumerate(ABOUT_FIELDS):
+    for row, (label, value) in enumerate(about_fields()):
         heading = QtWidgets.QLabel(f"{label}:")
         heading.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         # Dimmed so the values, not the field names, are what stands out.
